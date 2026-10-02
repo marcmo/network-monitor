@@ -1,6 +1,6 @@
 # Two independent operators reduce false outage reports from a single service.
 tcp_targets = ["1.1.1.1:443", "8.8.8.8:443"]
-# 2 s cadence + 1.5 s deadline + up to 1 s display delay targets a 5 s alert.
+# 2 s cadence + 1.5 s deadline + 1 s app refresh + 0.5 s terminal poll targets 5 s.
 tcp_interval_ms = 2000
 tcp_timeout_ms = 1500
 

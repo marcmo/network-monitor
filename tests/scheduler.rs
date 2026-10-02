@@ -100,6 +100,74 @@ async fn outage_after_last_success_is_detected_within_five_seconds_including_ren
 }
 
 #[tokio::test(start_paused = true)]
+async fn delayed_probe_start_keeps_outage_within_five_seconds_through_both_display_phases() {
+    for delayed_start in [2001, 2251, 2501, 2751, 2999] {
+        let delay = visible_outage_delay(delayed_start).await;
+        assert!(
+            delay <= 5000,
+            "start at {delayed_start}ms: outage visible only after {delay}ms"
+        );
+    }
+}
+
+async fn visible_outage_delay(delayed_start: u64) -> u64 {
+    let config = Config::default();
+    let (events_tx, mut events_rx) = mpsc::channel(128);
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (healthy_tx, healthy) = watch::channel(true);
+    let task = tokio::spawn(run_sampler_with(
+        config.clone(),
+        SwitchRunner { healthy },
+        TestClock::new(Utc::now()),
+        events_tx,
+        shutdown_rx,
+    ));
+    let mut monitor = Monitor::new(config);
+    settle().await;
+    while let Ok(event) = events_rx.try_recv() {
+        monitor.apply(event);
+    }
+    // A start just after the heartbeat reproduces the observed 2s/3s cadence.
+    tokio::time::advance(Duration::from_millis(delayed_start)).await;
+    settle().await;
+    while let Ok(event) = events_rx.try_recv() {
+        monitor.apply(event);
+    }
+    let mut published = monitor.snapshot(delayed_start).status;
+    assert_eq!(published, Status::Healthy);
+    assert!(monitor.snapshot(delayed_start).probes.iter().any(|probe| {
+        probe.kind == ProbeKind::Tcp
+            && probe
+                .observation
+                .as_ref()
+                .is_some_and(|observation| observation.started_elapsed_ms == delayed_start)
+    }));
+    tokio::time::advance(Duration::from_millis(1)).await;
+    healthy_tx.send(false).unwrap();
+    let outage_at = delayed_start + 1;
+    let poll_ms = network_monitor::terminal::INPUT_POLL_INTERVAL.as_millis() as u64;
+    let mut detected_at = None;
+    for now in outage_at + 1..=outage_at + 6000 {
+        tokio::time::advance(Duration::from_millis(1)).await;
+        settle().await;
+        while let Ok(event) = events_rx.try_recv() {
+            monitor.apply(event);
+        }
+        if now % 1000 == 0 {
+            published = monitor.snapshot(now).status;
+        }
+        // Poll just before publication to exercise almost the entire terminal delay.
+        if now % poll_ms == poll_ms - 1 && published == Status::Offline {
+            detected_at = Some(now);
+            break;
+        }
+    }
+    shutdown_tx.send(true).unwrap();
+    task.await.unwrap().unwrap();
+    detected_at.unwrap() - outage_at
+}
+
+#[tokio::test(start_paused = true)]
 async fn queue_overload_is_an_explicit_error_carrying_the_completed_observation() {
     let config = Config::default();
     let (events_tx, _events_rx) = mpsc::channel(1);
@@ -299,11 +367,11 @@ async fn delayed_scheduling_does_not_turn_an_over_deadline_completion_into_succe
     let mut tcp_count = 0;
     while let Ok(event) = events_rx.try_recv() {
         assert!(!matches!(event, Event::Gap(_)));
-        if let Event::Probe(observation) = event {
-            if observation.kind == ProbeKind::Tcp {
-                tcp_count += 1;
-                assert!(!observation.outcome.is_success());
-            }
+        if let Event::Probe(observation) = event
+            && observation.kind == ProbeKind::Tcp
+        {
+            tcp_count += 1;
+            assert!(!observation.outcome.is_success());
         }
     }
     assert_eq!(tcp_count, 2);

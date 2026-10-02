@@ -166,10 +166,10 @@ impl ProbeRunner for NetworkProbes {
 fn https_error_outcome(error: &reqwest::Error) -> ProbeOutcome {
     let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(error);
     while let Some(current) = cause {
-        if let Some(resolver_error) = current.downcast_ref::<ResolverError>() {
-            if resolver_error.is_unavailable() {
-                return ProbeOutcome::Unavailable(resolver_error.to_string());
-            }
+        if let Some(resolver_error) = current.downcast_ref::<ResolverError>()
+            && resolver_error.is_unavailable()
+        {
+            return ProbeOutcome::Unavailable(resolver_error.to_string());
         }
         cause = current.source();
     }

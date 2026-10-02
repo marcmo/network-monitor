@@ -197,34 +197,32 @@ impl Monitor {
                 }
                 let second = observation.at.elapsed_ms / 1000;
                 self.advance(second);
-                if observation.kind == ProbeKind::Tcp && observation.outcome.is_measurement() {
-                    if let Some(point) = self
+                if observation.kind == ProbeKind::Tcp
+                    && observation.outcome.is_measurement()
+                    && let Some(point) = self
                         .history
                         .iter_mut()
                         .find(|point| point.elapsed_second == second)
-                    {
-                        if observation.outcome.is_success() {
-                            point.successes += 1;
-                            point.latency_ms =
-                                Some(point.latency_ms.map_or(observation.duration_ms, |old| {
-                                    old.max(observation.duration_ms)
-                                }));
-                        } else {
-                            point.failures += 1;
-                        }
+                {
+                    if observation.outcome.is_success() {
+                        point.successes += 1;
+                        point.latency_ms =
+                            Some(point.latency_ms.map_or(observation.duration_ms, |old| {
+                                old.max(observation.duration_ms)
+                            }));
+                    } else {
+                        point.failures += 1;
                     }
                 }
                 if let Some(probe) = self.probes.iter_mut().find(|probe| {
                     probe.kind == observation.kind && probe.target == observation.target
-                }) {
-                    if probe
-                        .observation
-                        .as_ref()
-                        .is_none_or(|old| observation.at.elapsed_ms >= old.at.elapsed_ms)
-                    {
-                        probe.observation = Some(observation);
-                        self.has_observations = true;
-                    }
+                }) && probe
+                    .observation
+                    .as_ref()
+                    .is_none_or(|old| observation.at.elapsed_ms >= old.at.elapsed_ms)
+                {
+                    probe.observation = Some(observation);
+                    self.has_observations = true;
                 }
             }
             Event::Gap(gap) => {

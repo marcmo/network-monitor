@@ -3,7 +3,7 @@ use std::{future::Future, pin::Pin, time::Duration};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinSet,
     time::{Instant, MissedTickBehavior},
 };
@@ -38,6 +38,15 @@ pub struct ClockReading {
 
 pub trait Clock: Clone + Send + 'static {
     fn reading(&self) -> ClockReading;
+}
+
+pub(crate) fn clock_has_gap(previous: &ClockReading, now: &ClockReading, config: &Config) -> bool {
+    let elapsed_delta = now.elapsed_ms.saturating_sub(previous.elapsed_ms);
+    let awake_delta = now
+        .awake_elapsed_ms
+        .saturating_sub(previous.awake_elapsed_ms);
+    elapsed_delta.saturating_sub(awake_delta) > SUSPEND_CLOCK_TOLERANCE_MS
+        || elapsed_delta >= config.clock_gap_ms
 }
 
 #[derive(Clone)]
@@ -186,7 +195,29 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
     runner: P,
     clock: C,
     events: mpsc::Sender<Event>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), SamplerError> {
+    run_sampler(config, runner, clock, events, shutdown, None).await
+}
+
+pub(crate) async fn run_sampler_with_refresh<P: ProbeRunner, C: Clock>(
+    config: Config,
+    runner: P,
+    clock: C,
+    events: mpsc::Sender<Event>,
+    shutdown: watch::Receiver<bool>,
+    refresh: mpsc::Receiver<oneshot::Sender<ClockReading>>,
+) -> Result<(), SamplerError> {
+    run_sampler(config, runner, clock, events, shutdown, Some(refresh)).await
+}
+
+async fn run_sampler<P: ProbeRunner, C: Clock>(
+    config: Config,
+    runner: P,
+    clock: C,
+    events: mpsc::Sender<Event>,
     mut shutdown: watch::Receiver<bool>,
+    mut refresh: Option<mpsc::Receiver<oneshot::Sender<ClockReading>>>,
 ) -> Result<(), SamplerError> {
     config.validate()?;
     let specs = probe_specs(&config);
@@ -206,23 +237,48 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
             Tick,
             Shutdown,
             Probe(Option<Result<(usize, Observation), tokio::task::JoinError>>),
+            Refresh(Option<oneshot::Sender<ClockReading>>),
         }
+        let due = next_due
+            .iter()
+            .zip(&running)
+            .filter_map(|(due, running)| (!running).then_some(*due))
+            .min();
         let wake = tokio::select! {
             biased;
             changed = shutdown.changed() => { let _ = changed; Wake::Shutdown },
+            request = async {
+                match refresh.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => Wake::Refresh(request),
+            _ = async {
+                match due {
+                    Some(due) => tokio::time::sleep_until(due).await,
+                    None => std::future::pending().await,
+                }
+            } => Wake::Tick,
             _ = heartbeat.tick() => Wake::Tick,
             result = tasks.join_next(), if !tasks.is_empty() => Wake::Probe(result),
         };
-        if matches!(wake, Wake::Shutdown) {
-            break Ok(());
-        }
-        if let Wake::Probe(Some(result)) = wake {
-            match result {
-                Ok(completed) => pending_completion = Some(completed),
-                Err(error) if error.is_cancelled() => {}
-                Err(error) => break Err(SamplerError::Task(error.to_string())),
+        let refresh_reply = match wake {
+            Wake::Shutdown => break Ok(()),
+            Wake::Refresh(Some(reply)) => Some(reply),
+            Wake::Refresh(None) => {
+                refresh = None;
+                None
             }
-        }
+            Wake::Probe(Some(result)) => {
+                match result {
+                    Ok(completed) => pending_completion = Some(completed),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => break Err(SamplerError::Task(error.to_string())),
+                }
+                None
+            }
+            Wake::Tick | Wake::Probe(None) => None,
+        };
         let now = clock.reading();
         let elapsed_delta = now.elapsed_ms.saturating_sub(previous.elapsed_ms);
         let wall_delta = now
@@ -231,8 +287,8 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
             .num_milliseconds();
         let clock_delta =
             wall_delta.saturating_sub(i64::try_from(elapsed_delta).unwrap_or(i64::MAX));
-        if clock_delta.unsigned_abs() > 2000 {
-            if let Err(error) = emit(
+        if clock_delta.unsigned_abs() > 2000
+            && let Err(error) = emit(
                 &events,
                 Event::ClockAdjusted {
                     at: Stamp {
@@ -242,15 +298,11 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
                     },
                     delta_ms: clock_delta,
                 },
-            ) {
-                break Err(error);
-            }
+            )
+        {
+            break Err(error);
         }
-        let awake_delta = now
-            .awake_elapsed_ms
-            .saturating_sub(previous.awake_elapsed_ms);
-        let suspended = elapsed_delta.saturating_sub(awake_delta) > SUSPEND_CLOCK_TOLERANCE_MS;
-        if suspended || elapsed_delta >= config.clock_gap_ms {
+        if clock_has_gap(&previous, &now, &config) {
             generation += 1;
             tasks.abort_all();
             if let Err(error) = emit(
@@ -268,16 +320,16 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
                 break Err(error);
             }
             while let Some(result) = tasks.join_next().await {
-                if let Ok((_, observation)) = result {
-                    if let Err(error) = emit(&events, Event::Probe(observation)) {
-                        break 'sampling Err(error);
-                    }
+                if let Ok((_, observation)) = result
+                    && let Err(error) = emit(&events, Event::Probe(observation))
+                {
+                    break 'sampling Err(error);
                 }
             }
             running.fill(false);
             next_due.fill(Instant::now());
         }
-        previous = now;
+        previous = now.clone();
         if let Some((index, observation)) = pending_completion.take() {
             if observation.at.generation == generation {
                 running[index] = false;
@@ -285,6 +337,10 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
             if let Err(error) = emit(&events, Event::Probe(observation)) {
                 break Err(error);
             }
+        }
+        if let Some(reply) = refresh_reply {
+            // The app drains prior events before publishing this clock-checked snapshot.
+            let _ = reply.send(now);
         }
         let now_instant = Instant::now();
         for (index, spec) in specs.iter().enumerate() {
