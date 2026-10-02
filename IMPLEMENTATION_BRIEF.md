@@ -144,6 +144,22 @@ Deliver working code and a concise report of what works, how it was verified,
 and remaining limitations. Resolve routine implementation choices autonomously;
 ask only for material scope changes or unavoidable user interaction.
 
+## Approved follow-up: passive traffic and at-a-glance latency (2026-10-02)
+
+Use Ratatui's Sparkline widget for live history. Make the current latency and
+current download/upload rates easy to read at a glance, with recent history.
+The user explicitly selected passive current download/upload traffic, not
+available capacity or an active speed test. Read macOS interface counters for
+the active connection without test downloads or subprocesses per sample.
+Show the measured interface and label rates clearly. Preserve the existing
+five-minute view, full-ride recordings, bounded owned state and message passing.
+Interface changes, counter resets, unavailable counters and sleep must not
+create fabricated rates or leave stale values apparently current. Record raw
+counters/timestamps and rate validity so later analysis can interpret readings.
+These are traffic rates for the selected interface, not bandwidth capacity or
+per-application attribution. Keep measurement/rendering/storage independent and
+verify deterministic rate arithmetic, invalidation, persistence and terminal UI.
+
 ## User coding and Git rules
 
 - Favor safety and correctness, typed errors with meaningful messages, enums,

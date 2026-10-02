@@ -102,12 +102,48 @@ Only one system DNS worker exists, with a bounded mailbox. An uncancellable
 create an accumulating pool of stuck resolver threads. All probes have bounded
 application deadlines and no application retry loops.
 
-## Five-minute display and complete recordings
+## Five-minute display
 
 The graph shows the last 300 elapsed seconds and advances once per second,
 including during an outage or while no observations are arriving. Missing
 observations and explicit gaps are different from measured failures. Latencies
 are connection timings, not ICMP round-trip measurements.
+
+Ratatui sparklines draw the latency bars. Each terminal column shows the highest
+observed TCP latency in its time bucket, preserving short spikes when the window
+is compressed. Empty buckets stay blank. The row below uses `+` for success,
+`x` for failure, `|` for a gap, and `.` for no observation. Failures take precedence
+over gaps or successes sharing a column; the latency bar can still show a
+successful probe in that same bucket. A zero-millisecond result remains visible
+as `+` without inventing a positive latency.
+The headline shows the highest fresh, successful TCP latency, or `--` when no
+current successful TCP timing is available.
+
+## Passive download and upload traffic
+
+The traffic display reads macOS's 64-bit received and sent byte counters once
+per second and shows their change over elapsed time in decimal Mbps. It measures
+the selected interface's current traffic, including other applications and local
+network transfers. It does not run downloads, estimate available bandwidth, or
+attribute traffic to individual applications.
+
+The display names the macOS primary interface being measured. Primary IPv4 is
+preferred, with primary IPv6 as a fallback. Multiple active interfaces and VPN
+routes can carry additional traffic elsewhere; these rates describe the named
+interface rather than the sum of all routes on the Mac.
+
+The first reading establishes a baseline. Switching interfaces, decreasing
+counters, suspension, unavailable readings, or stale observations invalidate the
+rate; a new valid sample pair is required. An observed zero rate is different
+from an unknown rate. Raw counters and timestamps are retained with the ride.
+
+The compact Down and Up sparklines cover the same five-minute window and retain
+the highest rate in each display column. Each has its own labeled Mbps scale.
+`_` marks measured zero, `.` missing data, and `|` an explicit gap without a
+measurement. Changing the interface clears the live traffic plots so their
+scope matches the displayed interface; earlier raw events remain recorded.
+
+## Complete recordings
 
 Recordings use SQLite with WAL journaling and `synchronous=FULL`. Raw events are
 stored for the entire session, not just the visible window. The recording writer
@@ -134,7 +170,14 @@ The database schema is version 1 (`PRAGMA user_version`):
   duration, and outcome. Location payloads retain coordinates, reported accuracy,
   and the source fix timestamp separately from receipt time.
 
-`event_type` is `probe`, `gap`, `location`, or `clock_adjusted`. JSON payloads use
+Traffic events (`event_type = 'traffic'`) retain the interface name/index and
+last-change identity, 64-bit received/sent byte totals, query start/completion time, and a typed rate
+state. Valid rates include download/upload Mbps and the interval used to derive
+them. Baselines, interface changes, resets, gaps, late/out-of-order readings, and
+source errors remain explicit instead of being stored as zero traffic. Readings
+have a 500 ms deadline and valid rates become stale after 2.5 s.
+
+`event_type` is `probe`, `gap`, `location`, `traffic`, or `clock_adjusted`. JSON payloads use
 an `event` discriminator and a `data` object. Probe outcomes use `type` and, when
 needed, `detail`; for example `success`, `timeout`, `refused`, `network_error`,
 `dns_error`, `http_status`, `tls_or_http_error`, `unavailable`, or `cancelled`.
@@ -197,8 +240,9 @@ commands, terminal cleanup results, and limits of the evidence. Resource targets
 are below 1% of one CPU core, 50 MiB resident memory, and 10 MB/hour of application
 probe traffic. Traffic estimates describe probe cost, not available bandwidth.
 
-On this Mac, two 315 s release runs measured 0.076% CPU / 16.69 MiB maximum RSS
-on the hotspot and 0.063% / 14.97 MiB under controlled timeouts. Filtered captures
-estimated 3.59 and 2.42 MB/hour including modeled Ethernet overhead. These short
-estimates include attribution limits and do not measure Wi-Fi or mobile-radio
-overhead, battery life, or every possible network failure.
+On this Mac, two 315 s release runs with passive traffic and sparklines measured
+0.114% CPU / 16.66 MiB maximum RSS on the current `en0` network and 0.104% /
+14.73 MiB under controlled timeouts. Filtered captures estimated 2.78 and
+2.42 MB/hour including modeled Ethernet overhead. These short estimates include
+attribution limits and do not measure Wi-Fi or mobile-radio overhead, battery
+life, or every possible network failure.

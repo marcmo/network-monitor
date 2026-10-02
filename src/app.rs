@@ -12,6 +12,7 @@ use crate::{
         run_sampler_with_refresh,
     },
     storage::{Recorder, Session, StorageError, TryRecordError},
+    traffic::TrafficSource,
     ui::View,
 };
 
@@ -52,9 +53,10 @@ pub enum AppError {
     Task(#[from] tokio::task::JoinError),
 }
 
-pub async fn run_session<P: ProbeRunner, C: Clock>(
+pub async fn run_session<P: ProbeRunner, T: TrafficSource, C: Clock>(
     options: AppOptions,
     runner: P,
+    traffic: T,
     clock: C,
     mut ports: AppPorts,
 ) -> Result<(), AppError> {
@@ -76,6 +78,7 @@ pub async fn run_session<P: ProbeRunner, C: Clock>(
     let mut sampler = tokio::spawn(run_sampler_with_refresh(
         options.config.clone(),
         runner,
+        traffic,
         clock.clone(),
         events_tx,
         stop_rx,

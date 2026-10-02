@@ -7,7 +7,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, Borders, Paragraph, Sparkline, Widget},
 };
 
 use crate::{config::Config, model::*};
@@ -30,15 +30,26 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
         return;
     }
     let rows = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(5),
         Constraint::Length(2),
-        Constraint::Min(6),
-        Constraint::Length(2),
+        Constraint::Length(1),
         Constraint::Length(8),
         Constraint::Length(3),
         Constraint::Length(2),
     ])
     .split(area);
     let (status, color) = status_text(view.snapshot.status);
+    let latency_ms = view
+        .snapshot
+        .probes
+        .iter()
+        .filter(|probe| probe.kind == ProbeKind::Tcp && probe.fresh)
+        .filter_map(|probe| probe.observation.as_ref())
+        .filter(|observation| observation.outcome.is_success())
+        .map(|observation| observation.duration_ms)
+        .max();
+    let latency = latency_ms.map_or_else(|| "--".into(), |value| format!("{value}ms"));
     let label = terminal_text(view.label.as_deref().unwrap_or("Unlabelled ride"));
     frame.render_widget(
         Paragraph::new(vec![
@@ -47,12 +58,23 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
                     format!(" {status} "),
                     Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(
+                    format!(" Latency: {latency}"),
+                    Style::default()
+                        .fg(if latency_ms.is_some() {
+                            Color::Cyan
+                        } else {
+                            Color::Gray
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw(format!(
-                    " {label} | elapsed {}m {:02}s",
+                    " (TCP max) | {label} | elapsed {}m {:02}s",
                     view.elapsed_ms / 60_000,
                     view.elapsed_ms / 1000 % 60
                 )),
             ]),
+            traffic_headline(&view.snapshot.traffic),
             Line::from(format!(
                 " Recording {} | display 1Hz | current sampled targets",
                 view.session_id
@@ -68,15 +90,15 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
         rows[1],
     );
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(" * TCP ms ", Style::default().fg(Color::Cyan)),
-                Span::styled("x FAILED ", Style::default().fg(Color::Red)),
-                Span::styled(". no observation  | gap", Style::default().fg(Color::Gray)),
-            ]),
-            Line::from(" Timings are TCP connection attempts; failures are not packet loss."),
-        ]),
+        TrafficGraph {
+            history: &view.snapshot.history,
+            now_second: view.elapsed_ms / 1000,
+        },
         rows[2],
+    );
+    frame.render_widget(
+        Paragraph::new(" TCP: + OK x fail | gap . missing | traffic: _ zero . missing | passive"),
+        rows[3],
     );
     let mut probes = Vec::with_capacity(8);
     for probe in &view.snapshot.probes {
@@ -140,7 +162,7 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
             Style::default().fg(color),
         )));
     }
-    frame.render_widget(Paragraph::new(probes), rows[3]);
+    frame.render_widget(Paragraph::new(probes), rows[4]);
     let location = match view
         .snapshot
         .location
@@ -183,7 +205,7 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
                 .collect::<Vec<_>>(),
         )
         .block(Block::default().borders(Borders::TOP)),
-        rows[4],
+        rows[5],
     );
     frame.render_widget(
         Paragraph::new(vec![
@@ -193,8 +215,125 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
             )),
             Line::from("q quit / Ctrl-C | full ride retained | slow threshold configurable"),
         ]),
-        rows[5],
+        rows[6],
     );
+}
+
+fn traffic_headline(state: &TrafficState) -> Line<'static> {
+    let interface = state
+        .interface
+        .as_ref()
+        .map_or_else(|| "--".into(), |interface| terminal_text(&interface.name));
+    let age = state
+        .age_ms
+        .map_or_else(|| "--".into(), |age| format!("{:.1}s", age as f64 / 1000.0));
+    let (down, up, status) = match state.observation.as_ref().map(|event| &event.rate) {
+        Some(TrafficRate::Valid {
+            download_mbps,
+            upload_mbps,
+            ..
+        }) if state.fresh => (
+            format!("{download_mbps:.2}"),
+            format!("{upload_mbps:.2}"),
+            "fresh",
+        ),
+        rate => (
+            "--".into(),
+            "--".into(),
+            match rate {
+                Some(TrafficRate::Valid { .. }) => "STALE",
+                Some(TrafficRate::InterfaceChanged) => "changed / baseline",
+                Some(TrafficRate::CounterReset) => "reset / baseline",
+                Some(TrafficRate::Gap) => "gap / unknown",
+                Some(TrafficRate::Late) => "late / unknown",
+                Some(TrafficRate::OutOfOrder) => "order / unknown",
+                Some(TrafficRate::Unavailable { .. }) => "unavailable",
+                Some(TrafficRate::Baseline) | None => "unknown / baseline",
+            },
+        ),
+    };
+    Line::from(vec![
+        Span::styled(
+            format!(" Down: {down} Mbps"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  Up: {up} Mbps"),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(" | {interface} | age {age} {status}")),
+    ])
+}
+
+struct TrafficGraph<'a> {
+    history: &'a [GraphPoint],
+    now_second: u64,
+}
+impl Widget for TrafficGraph<'_> {
+    fn render(self, area: Rect, buffer: &mut Buffer) {
+        for (row, download, color, label) in [
+            (0, true, Color::Green, "Down"),
+            (1, false, Color::Magenta, "Up"),
+        ] {
+            if area.height <= row || area.width <= 23 {
+                continue;
+            }
+            let plot = Rect::new(area.x + 23, area.y + row, area.width - 23, 1);
+            let mut values: Vec<Option<f64>> = vec![None; usize::from(plot.width)];
+            let mut gaps = vec![false; usize::from(plot.width)];
+            for point in self.history {
+                let age = self.now_second.saturating_sub(point.elapsed_second);
+                if age > 299 {
+                    continue;
+                }
+                let offset = ((299 - age) * u64::from(plot.width - 1) / 299) as usize;
+                gaps[offset] |= point.explicit_gap;
+                if let Some(value) = if download {
+                    point.download_mbps
+                } else {
+                    point.upload_mbps
+                } {
+                    values[offset] = Some(values[offset].map_or(value, |old| old.max(value)));
+                }
+            }
+            let maximum = values
+                .iter()
+                .flatten()
+                .copied()
+                .fold(0.0_f64, f64::max)
+                .max(0.1);
+            buffer.set_stringn(
+                area.x,
+                area.y + row,
+                format!(" {label} 0..{maximum:.1} Mbps"),
+                23,
+                Style::default().fg(color),
+            );
+            Sparkline::default()
+                .data(
+                    values
+                        .iter()
+                        .map(|value| value.map(|value| (value / maximum * 1000.0).round() as u64)),
+                )
+                .max(1000)
+                .style(Style::default().fg(color))
+                .absent_value_symbol(".")
+                .absent_value_style(Style::default().fg(Color::Gray))
+                .render(plot, buffer);
+            for (offset, value) in values.iter().enumerate() {
+                let cell = &mut buffer[(plot.x + offset as u16, plot.y)];
+                if *value == Some(0.0) {
+                    cell.set_symbol("_").set_fg(color);
+                } else if value.is_none() && gaps[offset] {
+                    cell.set_symbol("|").set_fg(Color::Gray);
+                }
+            }
+        }
+    }
 }
 
 fn status_text(status: Status) -> (&'static str, Color) {
@@ -246,6 +385,7 @@ impl Widget for LatencyGraph<'_> {
         }
         let plot_height = inner.height - 2;
         let baseline = inner.y + plot_height;
+        let mut latencies: Vec<Option<u64>> = vec![None; usize::from(inner.width)];
         for x in inner.x..inner.right() {
             buffer[(x, baseline)].set_symbol(".").set_fg(Color::Gray);
         }
@@ -256,22 +396,28 @@ impl Widget for LatencyGraph<'_> {
             }
             let offset = (299 - age) * u64::from(inner.width.saturating_sub(1)) / 299;
             let x = inner.x + offset as u16;
-            if point.explicit_gap {
+            if point.explicit_gap && buffer[(x, baseline)].symbol() != "x" {
                 buffer[(x, baseline)].set_symbol("|").set_fg(Color::Gray);
             }
             if point.failures > 0 {
                 buffer[(x, baseline)].set_symbol("x").set_fg(Color::Red);
             } else if point.successes > 0 && buffer[(x, baseline)].symbol() == "." {
-                buffer[(x, baseline)].set_symbol(" ");
+                buffer[(x, baseline)].set_symbol("+").set_fg(Color::Cyan);
             }
             if let Some(latency) = point.latency_ms {
-                let from_bottom =
-                    latency.saturating_mul(u64::from(plot_height.saturating_sub(1))) / maximum;
-                let y = inner.y + plot_height.saturating_sub(1)
-                    - from_bottom.min(u64::from(plot_height.saturating_sub(1))) as u16;
-                buffer[(x, y)].set_symbol("*").set_fg(Color::Cyan);
+                let column = &mut latencies[offset as usize];
+                *column = Some(column.map_or(latency, |old| old.max(latency)));
             }
         }
+        Sparkline::default()
+            .data(latencies)
+            .max(maximum)
+            .style(Style::default().fg(Color::Cyan))
+            .absent_value_style(Style::default().fg(Color::Gray))
+            .render(
+                Rect::new(inner.x, inner.y, inner.width, plot_height),
+                buffer,
+            );
         buffer.set_string(
             inner.x,
             inner.bottom() - 1,

@@ -7,4 +7,5 @@ pub mod probe;
 pub mod scheduler;
 pub mod storage;
 pub mod terminal;
+pub mod traffic;
 pub mod ui;

@@ -1,5 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=native/location.m");
+    println!("cargo:rerun-if-changed=native/traffic.c");
     println!("cargo:rerun-if-changed=native/Info.plist");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -11,6 +12,12 @@ fn main() {
         .warnings(true)
         .extra_warnings(true)
         .compile("network_monitor_location");
+    cc::Build::new()
+        .file("native/traffic.c")
+        .warnings(true)
+        .extra_warnings(true)
+        .compile("network_monitor_traffic");
+    println!("cargo:rustc-link-lib=framework=SystemConfiguration");
     println!("cargo:rustc-link-lib=framework=CoreLocation");
     println!("cargo:rustc-link-lib=framework=Foundation");
     println!("cargo:rustc-link-lib=framework=CoreFoundation");

@@ -11,6 +11,7 @@ use tokio::{
 use crate::{
     config::{Config, ConfigError},
     model::*,
+    traffic::{NoTraffic, Rates, Sample, TrafficSource, TrafficSourceError},
 };
 
 pub const EVENT_QUEUE_CAPACITY: usize = 128;
@@ -197,23 +198,54 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
     events: mpsc::Sender<Event>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), SamplerError> {
-    run_sampler(config, runner, clock, events, shutdown, None).await
+    run_sampler(
+        config,
+        runner,
+        None::<NoTraffic>,
+        clock,
+        events,
+        shutdown,
+        None,
+    )
+    .await
 }
 
-pub(crate) async fn run_sampler_with_refresh<P: ProbeRunner, C: Clock>(
+pub async fn run_sampler_with_traffic<P: ProbeRunner, T: TrafficSource, C: Clock>(
     config: Config,
     runner: P,
+    traffic: T,
+    clock: C,
+    events: mpsc::Sender<Event>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), SamplerError> {
+    run_sampler(config, runner, Some(traffic), clock, events, shutdown, None).await
+}
+
+pub(crate) async fn run_sampler_with_refresh<P: ProbeRunner, T: TrafficSource, C: Clock>(
+    config: Config,
+    runner: P,
+    traffic: T,
     clock: C,
     events: mpsc::Sender<Event>,
     shutdown: watch::Receiver<bool>,
     refresh: mpsc::Receiver<oneshot::Sender<ClockReading>>,
 ) -> Result<(), SamplerError> {
-    run_sampler(config, runner, clock, events, shutdown, Some(refresh)).await
+    run_sampler(
+        config,
+        runner,
+        Some(traffic),
+        clock,
+        events,
+        shutdown,
+        Some(refresh),
+    )
+    .await
 }
 
-async fn run_sampler<P: ProbeRunner, C: Clock>(
+async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
     config: Config,
     runner: P,
+    traffic: Option<T>,
     clock: C,
     events: mpsc::Sender<Event>,
     mut shutdown: watch::Receiver<bool>,
@@ -229,6 +261,10 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
     let mut generation = 0;
     let mut previous = clock.reading();
     let mut pending_completion = None;
+    let mut traffic_tasks = JoinSet::new();
+    let mut traffic_due = Instant::now();
+    let mut rates = Rates::default();
+    let mut pending_traffic = None;
     let result = 'sampling: loop {
         if *shutdown.borrow() {
             break Ok(());
@@ -236,6 +272,7 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
         enum Wake {
             Tick,
             Shutdown,
+            Traffic(Option<Result<Sample, tokio::task::JoinError>>),
             Probe(Option<Result<(usize, Observation), tokio::task::JoinError>>),
             Refresh(Option<oneshot::Sender<ClockReading>>),
         }
@@ -243,6 +280,7 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
             .iter()
             .zip(&running)
             .filter_map(|(due, running)| (!running).then_some(*due))
+            .chain((traffic.is_some() && traffic_tasks.is_empty()).then_some(traffic_due))
             .min();
         let wake = tokio::select! {
             biased;
@@ -261,6 +299,7 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
             } => Wake::Tick,
             _ = heartbeat.tick() => Wake::Tick,
             result = tasks.join_next(), if !tasks.is_empty() => Wake::Probe(result),
+            result = traffic_tasks.join_next(), if !traffic_tasks.is_empty() => Wake::Traffic(result),
         };
         let refresh_reply = match wake {
             Wake::Shutdown => break Ok(()),
@@ -277,7 +316,15 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
                 }
                 None
             }
-            Wake::Tick | Wake::Probe(None) => None,
+            Wake::Traffic(Some(result)) => {
+                match result {
+                    Ok(completed) => pending_traffic = Some(completed),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => break Err(SamplerError::Task(error.to_string())),
+                }
+                None
+            }
+            Wake::Tick | Wake::Probe(None) | Wake::Traffic(None) => None,
         };
         let now = clock.reading();
         let elapsed_delta = now.elapsed_ms.saturating_sub(previous.elapsed_ms);
@@ -304,6 +351,7 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
         }
         if clock_has_gap(&previous, &now, &config) {
             generation += 1;
+            rates.invalidate();
             tasks.abort_all();
             if let Err(error) = emit(
                 &events,
@@ -337,6 +385,42 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
             if let Err(error) = emit(&events, Event::Probe(observation)) {
                 break Err(error);
             }
+        }
+        if let Some(sample) = pending_traffic.take()
+            && let Err(error) = emit(
+                &events,
+                Event::Traffic(rates.observe(sample, &now, generation)),
+            )
+        {
+            break Err(error);
+        }
+        if traffic_tasks.is_empty()
+            && traffic_due <= Instant::now()
+            && let Some(source) = &traffic
+        {
+            traffic_due = Instant::now() + Duration::from_millis(TRAFFIC_INTERVAL_MS);
+            let source = source.clone();
+            let clock = clock.clone();
+            traffic_tasks.spawn(async move {
+                let started = clock.reading();
+                let counters = match tokio::time::timeout(
+                    Duration::from_millis(TRAFFIC_TIMEOUT_MS),
+                    source.sample(),
+                )
+                .await
+                {
+                    Ok(counters) => counters,
+                    Err(_) => Err(TrafficSourceError(
+                        "interface counter query timed out".into(),
+                    )),
+                };
+                Sample {
+                    started,
+                    ended: clock.reading(),
+                    generation,
+                    counters,
+                }
+            });
         }
         if let Some(reply) = refresh_reply {
             // The app drains prior events before publishing this clock-checked snapshot.
@@ -399,6 +483,7 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
         }
     };
     tasks.abort_all();
+    traffic_tasks.abort_all();
     let mut undelivered = Vec::new();
     let mut result = match result {
         Err(SamplerError::Overloaded(events)) => {
@@ -420,6 +505,27 @@ async fn run_sampler<P: ProbeRunner, C: Clock>(
                 }
             } else {
                 undelivered.push(Event::Probe(observation));
+            }
+        }
+    }
+    if let Some(sample) = pending_traffic.take() {
+        undelivered.push(Event::Traffic(rates.observe(
+            sample,
+            &clock.reading(),
+            generation,
+        )));
+    }
+    while let Some(completed) = traffic_tasks.join_next().await {
+        if let Ok(sample) = completed {
+            let event = Event::Traffic(rates.observe(sample, &clock.reading(), generation));
+            if undelivered.is_empty() {
+                match emit(&events, event) {
+                    Err(SamplerError::Overloaded(events)) => undelivered.extend(events),
+                    Err(error) => result = Err(error),
+                    Ok(()) => {}
+                }
+            } else {
+                undelivered.push(event);
             }
         }
     }

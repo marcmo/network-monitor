@@ -6,6 +6,7 @@ use network_monitor::{
     location,
     probe::{NetworkProbes, ProbeSetupError},
     scheduler::{EVENT_QUEUE_CAPACITY, SamplerError, SystemClock},
+    traffic::{NativeCounters, TrafficWorker},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -103,6 +104,7 @@ fn run_worker(
         .enable_all()
         .build()?;
     let runner = NetworkProbes::new(&options.config)?;
+    let traffic = TrafficWorker::new(NativeCounters)?;
     let (controls, control_rx) = mpsc::channel(8);
     let (views, view_rx) = watch::channel(None);
     let signal_controls = controls.clone();
@@ -141,6 +143,7 @@ fn run_worker(
         runtime.block_on(network_monitor::app::run_session(
             options,
             runner,
+            traffic,
             clock,
             AppPorts {
                 controls: control_rx,

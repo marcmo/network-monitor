@@ -223,6 +223,7 @@ fn insert_event(connection: &Connection, session: &str, event: &Event) -> Result
     let stamp = event.stamp();
     let kind = match event {
         Event::Probe(_) => "probe",
+        Event::Traffic(_) => "traffic",
         Event::Gap(_) => "gap",
         Event::Location(_) => "location",
         Event::ClockAdjusted { .. } => "clock_adjusted",

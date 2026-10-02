@@ -90,10 +90,64 @@ pub struct LocationEvent {
     pub state: LocationState,
 }
 
+pub const TRAFFIC_INTERVAL_MS: u64 = 1000;
+pub const TRAFFIC_STALE_AFTER_MS: u64 = 2500;
+pub const TRAFFIC_TIMEOUT_MS: u64 = 500;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrafficInterface {
+    pub name: String,
+    pub index: u32,
+    pub change_id: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrafficCounters {
+    pub interface: TrafficInterface,
+    pub received_bytes: u64,
+    pub sent_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TrafficRate {
+    Valid {
+        download_mbps: f64,
+        upload_mbps: f64,
+        interval_ms: u64,
+    },
+    Baseline,
+    InterfaceChanged,
+    CounterReset,
+    Gap,
+    Late,
+    OutOfOrder,
+    Unavailable {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TrafficEvent {
+    pub at: Stamp,
+    pub started_elapsed_ms: u64,
+    pub counters: Option<TrafficCounters>,
+    pub rate: TrafficRate,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TrafficState {
+    pub interface: Option<TrafficInterface>,
+    pub observation: Option<TrafficEvent>,
+    pub age_ms: Option<u64>,
+    pub fresh: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Event {
     Probe(Observation),
+    Traffic(TrafficEvent),
     Gap(Gap),
     Location(LocationEvent),
     ClockAdjusted { at: Stamp, delta_ms: i64 },
@@ -103,6 +157,7 @@ impl Event {
     pub fn stamp(&self) -> &Stamp {
         match self {
             Self::Probe(v) => &v.at,
+            Self::Traffic(v) => &v.at,
             Self::Gap(v) => &v.at,
             Self::Location(v) => &v.at,
             Self::ClockAdjusted { at, .. } => at,
@@ -136,6 +191,8 @@ pub struct GraphPoint {
     pub successes: u32,
     pub failures: u32,
     pub explicit_gap: bool,
+    pub download_mbps: Option<f64>,
+    pub upload_mbps: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +201,7 @@ pub struct Snapshot {
     pub probes: Vec<ProbeState>,
     pub history: Vec<GraphPoint>,
     pub location: Option<LocationEvent>,
+    pub traffic: TrafficState,
     pub generation: u64,
 }
 
@@ -153,6 +211,8 @@ pub struct Monitor {
     history: VecDeque<GraphPoint>,
     generation: u64,
     location: Option<LocationEvent>,
+    traffic: Option<TrafficEvent>,
+    traffic_interface: Option<TrafficInterface>,
     has_observations: bool,
 }
 
@@ -180,6 +240,8 @@ impl Monitor {
             history: VecDeque::with_capacity(301),
             generation: 0,
             location: None,
+            traffic: None,
+            traffic_interface: None,
             has_observations: false,
         }
     }
@@ -225,8 +287,58 @@ impl Monitor {
                     self.has_observations = true;
                 }
             }
+            Event::Traffic(observation) => {
+                if observation.at.generation != self.generation {
+                    return;
+                }
+                if self
+                    .traffic
+                    .as_ref()
+                    .is_some_and(|old| observation.at.elapsed_ms <= old.at.elapsed_ms)
+                {
+                    self.traffic = None;
+                    return;
+                }
+                if let Some(counters) = &observation.counters {
+                    if self
+                        .traffic_interface
+                        .as_ref()
+                        .is_some_and(|interface| *interface != counters.interface)
+                    {
+                        for point in &mut self.history {
+                            point.download_mbps = None;
+                            point.upload_mbps = None;
+                        }
+                    }
+                    self.traffic_interface = Some(counters.interface.clone());
+                }
+                self.advance(observation.at.elapsed_ms / 1000);
+                if let TrafficRate::Valid {
+                    download_mbps,
+                    upload_mbps,
+                    ..
+                } = observation.rate
+                    && let Some(point) = self
+                        .history
+                        .iter_mut()
+                        .find(|point| point.elapsed_second == observation.at.elapsed_ms / 1000)
+                {
+                    point.download_mbps = Some(
+                        point
+                            .download_mbps
+                            .map_or(download_mbps, |old| old.max(download_mbps)),
+                    );
+                    point.upload_mbps = Some(
+                        point
+                            .upload_mbps
+                            .map_or(upload_mbps, |old| old.max(upload_mbps)),
+                    );
+                }
+                self.traffic = Some(observation);
+            }
             Event::Gap(gap) => {
                 self.generation = gap.at.generation;
+                self.traffic = None;
                 for probe in &mut self.probes {
                     probe.observation = None;
                 }
@@ -347,8 +459,23 @@ impl Monitor {
         } else {
             Status::Healthy
         };
+        let traffic_age = self
+            .traffic
+            .as_ref()
+            .and_then(|event| now_ms.checked_sub(event.at.elapsed_ms));
+        let traffic = TrafficState {
+            interface: self.traffic_interface.clone(),
+            fresh: traffic_age.is_some_and(|age| age <= TRAFFIC_STALE_AFTER_MS)
+                && self
+                    .traffic
+                    .as_ref()
+                    .is_some_and(|event| matches!(event.rate, TrafficRate::Valid { .. })),
+            observation: self.traffic.clone(),
+            age_ms: traffic_age,
+        };
         Snapshot {
             status,
+            traffic,
             probes: self.probes.clone(),
             history: self.history.iter().cloned().collect(),
             location: self.location.clone(),

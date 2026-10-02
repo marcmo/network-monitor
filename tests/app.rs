@@ -6,6 +6,7 @@ use network_monitor::{
     model::*,
     scheduler::{Clock, ClockReading, ProbeRunner, ProbeSpec, SystemClock},
     storage::{read_events, read_sessions},
+    traffic::NoTraffic,
 };
 use std::{future::Future, pin::Pin};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -87,6 +88,7 @@ async fn display_observing_short_suspend_before_sampler_cannot_publish_cached_he
             database: database.clone(),
         },
         SwitchRunner(healthy),
+        NoTraffic,
         DisplayFirstClock {
             start: tokio::time::Instant::now(),
             utc: Utc::now(),
@@ -156,6 +158,7 @@ async fn completed_samples_and_queued_denied_location_survive_quit_with_distinct
                 database: database.clone(),
             },
             Healthy,
+            NoTraffic,
             SystemClock::new().unwrap(),
             AppPorts {
                 controls: control_rx,
@@ -232,6 +235,7 @@ async fn native_setup_failure_is_recorded_without_stopping_connectivity() {
             database: database.clone(),
         },
         Healthy,
+        NoTraffic,
         SystemClock::new().unwrap(),
         AppPorts {
             controls: control_rx,
@@ -276,6 +280,7 @@ async fn a_terminal_error_stops_sampling_but_drains_completed_events() {
             database: database.clone(),
         },
         Healthy,
+        NoTraffic,
         SystemClock::new().unwrap(),
         AppPorts {
             controls: control_rx,
@@ -327,6 +332,7 @@ async fn recording_overload_salvages_every_accepted_location_before_stopping() {
             database: database.clone(),
         },
         Healthy,
+        NoTraffic,
         SystemClock::new().unwrap(),
         AppPorts {
             controls: control_rx,
@@ -397,6 +403,7 @@ async fn a_native_failure_already_queued_at_quit_is_still_recorded() {
             database: database.clone(),
         },
         Healthy,
+        NoTraffic,
         SystemClock::new().unwrap(),
         AppPorts {
             controls: control_rx,
