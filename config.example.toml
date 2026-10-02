@@ -1,0 +1,18 @@
+# Two independent operators reduce false outage reports from a single service.
+tcp_targets = ["1.1.1.1:443", "8.8.8.8:443"]
+# 2 s cadence + 1.5 s deadline + 1 s app refresh + 0.5 s terminal poll targets 5 s.
+tcp_interval_ms = 2000
+tcp_timeout_ms = 1500
+
+dns_name = "example.com"
+dns_interval_ms = 15000
+dns_timeout_ms = 2000
+https_url = "https://www.gstatic.com/generate_204"
+https_interval_ms = 30000
+https_timeout_ms = 3000
+
+# 250 ms is noticeable for interactive shells; it does not estimate throughput.
+slow_latency_ms = 250
+stale_after_ms = 5000
+# A paused scheduler produces missing observations, not simulated probe failures.
+clock_gap_ms = 5000
