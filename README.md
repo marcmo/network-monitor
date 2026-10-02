@@ -6,21 +6,42 @@ or comparison of alternative networks.
 
 ## Build and launch
 
-Requires Rust and the Xcode Command Line Tools on macOS. The application uses
-Tokio, Ratatui/Crossterm, reqwest/Rustls, bundled SQLite, and Apple's CoreLocation.
+Requires macOS, Rust 1.88 or newer, and the Xcode Command Line Tools. The
+application uses Tokio, Ratatui/Crossterm, reqwest/Rustls, bundled SQLite, and
+Apple's CoreLocation. No separate SQLite installation is needed.
 
 ```sh
 cd /Users/oliver.mueller/dev/network_monitor
 ./scripts/package-app.sh
-"./target/Network Monitor.app/Contents/MacOS/network-monitor" --label "Train ride"
+"/Users/oliver.mueller/dev/network_monitor/target/Network Monitor.app/Contents/MacOS/network-monitor" --label "Train ride"
 ```
 
-The package contains one executable. Launch the executable from your terminal;
-keep the terminal open while recording. Every launch starts a new session.
-Press `q` or Ctrl-C to finish and restore the terminal.
+The script builds a release executable, creates the app bundle, and applies and
+verifies an ad-hoc signature. The package contains one executable and has no
+application helper process. Launch the executable from your terminal; keep the
+terminal open while recording. Every launch starts a new session. Use a terminal
+of at least 80 columns by 24 rows; recording continues if it becomes smaller.
+Press `q` or Ctrl-C to finish and restore the terminal. SIGINT, SIGTERM, and SIGHUP
+also request an orderly shutdown.
 
 A plain `cargo build --release` also builds the executable, but the minimal app
 bundle was necessary to obtain a location prompt in the tested launch context.
+
+The default recording database is
+`~/Library/Application Support/network-monitor/rides.sqlite3`; parent directories
+are created automatically. Override the configuration, database, and optional
+ride label independently:
+
+```sh
+"/Users/oliver.mueller/dev/network_monitor/target/Network Monitor.app/Contents/MacOS/network-monitor" \
+  --config "/Users/oliver.mueller/dev/network_monitor/config.example.toml" \
+  --db "$HOME/Library/Application Support/network-monitor/test-rides.sqlite3" \
+  --label "Train ride"
+```
+
+Use `--help` for options and `--version` for the application version. Monitoring
+requires an interactive terminal for both input and output; redirected launches
+are rejected before creating a recording.
 
 ## Checks and interpretation
 
@@ -38,6 +59,12 @@ service guarantee. Configure thresholds and probe timing with a TOML file using
 `--config PATH`; start with [config.example.toml](config.example.toml). Unknown keys
 and invalid limits are rejected. Longer configured intervals also lengthen
 outage detection; the five-second target applies to the defaults.
+
+The default detection budget is approximately 2 s until the next TCP attempt +
+1.5 s deadline + 1 s application refresh + 0.5 s terminal poll = 5 s. This assumes
+normal OS scheduling and responsive terminal output. Deterministic tests cover
+delayed probe starts and both display phases; physical outages and arbitrary OS
+stalls do not have a hard real-time guarantee.
 
 TCP failures are **failed connection attempts**, not packet loss. Two independent
 TCP destinations provide quick reachability evidence; one failed destination is
@@ -60,9 +87,15 @@ Current status means:
   successful HTTPS check keeps the status `PARTIAL`.
 - `PARTIAL`: one TCP target failed, or DNS/HTTPS is missing, stale, unavailable,
   or failing.
-- `SLOW`: all checks succeeded but a TCP timing exceeds the configured threshold.
+- `SLOW`: all checks succeeded but a TCP timing meets or exceeds the configured
+  threshold.
 - `HEALTHY`: all checks are current and successful, with TCP timings below the
   threshold. This is a statement about the sampled targets.
+
+TCP observations become stale after 5 s by default. DNS and HTTPS freshness
+limits include their slower cadence and deadline plus 1 s: 18 s and 34 s
+respectively. An unavailable or canceled check is not a measured network
+failure. Location availability does not affect connectivity status.
 
 Only one system DNS worker exists, with a bounded mailbox. An uncancellable
 `getaddrinfo` call can make DNS/HTTPS unavailable until it returns; it cannot
@@ -83,12 +116,15 @@ sampler, application, and writer; overload or persistence errors are visible and
 stop monitoring instead of silently pretending that recording continues.
 
 Ordinary shutdown cancels outstanding probes, drains completed observations, and
-marks the recording ended. A crash can lose events still in bounded in-memory
-queues; already committed SQLite events survive according to SQLite and the
-filesystem's durability guarantees. A session with no end timestamp was not
-closed normally. Recordings are retained until you delete them yourself.
+marks the recording ended when storage is writable. A crash or panic can lose
+events still in bounded in-memory queues and leave the session open; already
+committed SQLite events survive according to SQLite and the filesystem's
+durability guarantees. A persistence failure stops monitoring and may also leave
+an incomplete session. A session with no end timestamp was not closed normally.
+Recordings are retained until you delete them yourself. Permanently blocked
+terminal output can delay terminal-thread shutdown and restoration.
 
-The database schema is versioned with `PRAGMA user_version`:
+The database schema is version 1 (`PRAGMA user_version`):
 
 - `sessions`: session UUID, optional label, start/end UTC, application version,
   and the complete probe/threshold configuration as JSON.
@@ -97,6 +133,13 @@ The database schema is versioned with `PRAGMA user_version`:
   JSON payload. Probe payloads include target, protocol, start elapsed time,
   duration, and outcome. Location payloads retain coordinates, reported accuracy,
   and the source fix timestamp separately from receipt time.
+
+`event_type` is `probe`, `gap`, `location`, or `clock_adjusted`. JSON payloads use
+an `event` discriminator and a `data` object. Probe outcomes use `type` and, when
+needed, `detail`; for example `success`, `timeout`, `refused`, `network_error`,
+`dns_error`, `http_status`, `tls_or_http_error`, `unavailable`, or `cancelled`.
+Location state is `fix`, `pending`, `denied`, or `unavailable`. A gap records its
+start and reason; a clock adjustment records its signed UTC change in milliseconds.
 
 Use SQLite's JSON functions for later analysis. For example, after selecting the
 recording database path:
@@ -128,16 +171,34 @@ accuracy. Every returned valid fix retains its reported accuracy.
 
 The early test on this Mac confirmed the prompt and authorization for the bundled
 executable after the user approved. The first returned fix was roughly eight
-minutes old with about 60 m reported accuracy. This is why the application keeps
-source time and receipt time separate. Mac location depends on the environment;
-continuous useful positioning on a moving train is not guaranteed.
+minutes old with about 60 m reported accuracy. The packaged Rust application also
+received a real fix, about 176 s old with 40 m reported accuracy, followed by a
+temporarily unavailable state. This is why the application keeps source time and
+receipt time separate. Mac location depends on the environment; continuous useful
+positioning on a moving train is not guaranteed.
 
-Elapsed time on macOS uses `mach_continuous_time`, which includes sleep. A detected suspension (continuous versus awake time, with 50 ms tolerance) or a
-long scheduling delay records a gap and starts a new observation generation. Late results
-from earlier generations cannot restore current health. UTC clock adjustments
-are recorded independently so future analysis can account for wall-clock jumps.
+Elapsed time on macOS uses `mach_continuous_time`, which includes sleep. A detected
+suspension (continuous versus awake time, with 50 ms tolerance) or a long scheduling
+delay records a gap and starts a new observation generation. Late results from
+earlier generations cannot restore current health. UTC clock adjustments are
+recorded independently so future analysis can account for wall-clock jumps.
+Sleep behavior has deterministic test coverage; physical sleep/resume on this Mac
+has not been exercised.
 
 Apple references: [location usage description](https://developer.apple.com/documentation/bundleresources/information-property-list/nslocationusagedescription),
 [single-file executable metadata](https://developer.apple.com/library/archive/documentation/Security/Conceptual/CodeSigningGuide/Procedures/Procedures.html#//apple_ref/doc/uid/TP40005929-CH5-SW14),
 [permission attribution and launch context](https://developer.apple.com/forums/thread/732431),
 [Mac location](https://support.apple.com/en-gb/guide/mac-help/mh27621/mac).
+
+## Validation and resource use
+
+See [VALIDATION.md](VALIDATION.md) for the release measurements, exact verification
+commands, terminal cleanup results, and limits of the evidence. Resource targets
+are below 1% of one CPU core, 50 MiB resident memory, and 10 MB/hour of application
+probe traffic. Traffic estimates describe probe cost, not available bandwidth.
+
+On this Mac, two 315 s release runs measured 0.076% CPU / 16.69 MiB maximum RSS
+on the hotspot and 0.063% / 14.97 MiB under controlled timeouts. Filtered captures
+estimated 3.59 and 2.42 MB/hour including modeled Ethernet overhead. These short
+estimates include attribution limits and do not measure Wi-Fi or mobile-radio
+overhead, battery life, or every possible network failure.

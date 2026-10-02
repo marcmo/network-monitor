@@ -1,4 +1,5 @@
 /target/
 /IMPL_LEDGER.md
+/HANDOVER.md
 *.sqlite*
 .DS_Store
