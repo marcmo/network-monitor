@@ -1,5 +1,36 @@
 # Validation
 
+## Synchronized sparkline scrolling
+
+The scrolling fix follows `742c0aa`. The previous renderer rounded each sample's
+age into a column on every frame. With seven unchanged measurements at 80x24,
+advancing the clock from 300 s to 301 s moved one bar while the others stayed put.
+Adjacent measurements could also separate after previously sharing a peak bar.
+Both latency and traffic regressions reproduced this through the public renderer
+before the fix and passed after anchoring time buckets to session elapsed time.
+
+The regressions compare 31 consecutive frames at five terminal widths per graph,
+including compressed, one-second, and wider-than-one-second column layouts.
+They verify unchanged historical shapes, latency marker alignment, and actual
+leftward movement. The peak/failure test now advances through 31 frames, and the
+zero-latency test checks the exact 299/300-second retention boundary. Existing
+tests cover missing data, explicit gaps, zero traffic, and stale readings.
+
+On 2026-10-02, all 65 tests (including 16 UI tests), formatting, and Clippy with
+warnings denied passed. Release compilation took 8.16 s; app packaging and
+ad-hoc signature verification passed. The packaged executable's SHA-256 is
+`cf1ce96f5e0fae2ffcc4931c891860a7971a274c60fec4bb72a79014389d7e6e`.
+Evidence is local under `/tmp/nm-sparkline-validation`, including the red/green
+regression logs. Earlier resource measurements remain scoped to their stated
+commits; no sampler, recording, or native counter code changed in this fix.
+
+The packaged executable also completed a 20.170-second real-PTY smoke run: all
+16 Details/Escape/resize/capture actions completed, with eight verified captures
+at 120x34 and 80x24. It quit from Details in 0.513 s with exit code 0, restored
+terminal flags, left the alternate screen, and closed its single SQLite session.
+The user's existing recording process was left running. Terminal evidence is in
+`/tmp/nm-sparkline-validation/terminal`; this short run is not a resource benchmark.
+
 ## Graph with sidebar presentation
 
 The presentation follow-up to `ab1b728` implements the user-selected graph with
