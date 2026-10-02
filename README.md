@@ -4,6 +4,11 @@ A Rust terminal application for monitoring the Mac's current internet connection
 and retaining complete ride recordings. No daemon, speed tests, bandwidth claims,
 or comparison of alternative networks.
 
+![Terminal overview with latency history, current connection quality, and passive download/upload traffic](docs/images/overview.png)
+
+The overview keeps current latency, connection quality, and passive traffic
+visible beside the five-minute history. Press `d` for detailed diagnostics.
+
 ## Build and launch
 
 Requires macOS, Rust 1.88 or newer, and the Xcode Command Line Tools. The
