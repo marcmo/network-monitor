@@ -1,5 +1,73 @@
 # Validation
 
+## Graph with sidebar presentation
+
+The presentation follow-up to `ab1b728` implements the user-selected graph with
+sidebar. The overview prioritizes latency, freshness, quality/reason and passive
+traffic; `d` opens the live Details view and `Esc` returns. Sampling, model,
+recording and native counter code remain unchanged in this presentation update.
+
+Validated on 2026-10-02: all 63 tests (including 14 UI tests), `cargo fmt --check`,
+and `cargo clippy --all-targets -- -D warnings` passed. Release packaging and
+ad-hoc signature verification passed; the release compilation took 10.42 s.
+The packaged executable's SHA-256 is
+`2d61d2e2fcf0455f17a9a570511618da627b0107f26a2ab9d350c293cd37f65b`.
+
+UI regressions exercise the 80x24 overview and Details layouts, quality reasons,
+fresh/stale/unknown latency, large numeric fallback, passive traffic units and
+interface names, long untrusted text, and a 30x8 small-terminal fallback.
+The existing peak/failure/gap and zero-value graph coverage remains in place.
+
+The packaged executable passed two real-PTY runs, one with default probes and
+one with controlled TCP/HTTPS timeouts. Each ran for 20 active seconds and
+completed all 16 scheduled capture, toggle, Escape, and resize actions. Eight
+intermediate screens per run verified both 120x34 and 80x24 layouts. Each run
+quit from Details, exited with code 0, restored terminal flags, left the alternate
+screen, and closed its single SQLite session normally.
+
+| Result | Default probes | Controlled timeouts |
+| --- | ---: | ---: |
+| Active duration | 20.165 s | 20.167 s |
+| Quit latency | 0.512 s | 0.511 s |
+| TCP results | 22 successes | 20 timeouts |
+| DNS results | 2 successes | 2 successes |
+| HTTPS results | 1 success | 1 timeout |
+| Passive traffic | 1 baseline, 20 valid rates | 1 baseline, 20 valid rates |
+
+The healthy overview showed current latency and `HEALTHY`; the timeout view
+showed `OFFLINE`, `-- ms`, and the reason that both TCP targets failed. Traffic
+continued independently. Recorded traffic observations span every navigation
+phase, confirming that opening Details and resizing did not pause acquisition.
+Separate Ctrl-C and SIGTERM runs also exited with code 0, restored the terminal,
+and closed their recordings, with quit latencies of 0.520 s and 0.305 s.
+
+The interaction sequence can be repeated from the repository root:
+
+```sh
+python3 scripts/verify_terminal.py --duration 20 --exercise-details \
+  --output /tmp/nm-presentation-check -- \
+  'target/Network Monitor.app/Contents/MacOS/network-monitor' \
+  --db /tmp/nm-presentation-check.sqlite3 --label 'Presentation validation'
+```
+
+Gate logs, PNG/text captures, interaction logs, recordings, and the independent
+recording/screen audit remain local under `/tmp/nm-wp05-validation`. Summary:
+`presentation-results.json`; representative captures:
+`healthy/overview-80-escape/screen.png`, `healthy/details-80/screen.png`, and
+`failing/overview-80-escape/screen.png`. All owned validation processes stopped;
+the user's existing Train ride session was left running.
+
+Independent review found no HIGH or MEDIUM issues. One LOW issue is deferred:
+below six terminal rows, the resize prompt precedes essential fallback lines,
+so quit hints clip at 80x5 and recording duration also clips at 80x4. The
+supported minimum remains 80x24, and recording and quit keys still work.
+
+The five-minute CPU/RSS/counter/packet measurements below refer to `ab1b728`.
+They were not repeated for this presentation update and do not measure the new
+packaged executable.
+
+## Passive traffic baseline at ab1b728
+
 Validated on 2026-10-02 with network-monitor 0.1.0, macOS 26.6.2, arm64
 Mac16,8, and Rust 1.96.0. The declared minimum Rust version is 1.88; the full
 suite was run with 1.96.0. Measurements use the packaged release executable:
@@ -12,7 +80,7 @@ The measured packaged executable's SHA-256 is
 `a8f91a5b955c4c0cdc12b3a4fb7b5028232ea813aaf7e820d62cee098d4a8c63`.
 The plain release binary differs because packaging applies an ad-hoc signature.
 
-## Build and behavioral checks
+### Build and behavioral checks
 
 From the repository root:
 
@@ -59,7 +127,7 @@ UI tests cover 80-column headlines, narrow Sparkline peak buckets, failure/gap
 precedence, zero latency, and stale readings. The native counter source also
 passes `clang -fsyntax-only -Wall -Wextra -Werror native/traffic.c`.
 
-## Passive counter cross-check
+### Passive counter cross-check
 
 A separate local C reader queried the macOS primary interface and 64-bit native
 byte counters once per second while the packaged application recorded ordinary
@@ -79,7 +147,7 @@ Cross-check artifacts and aggregation are local to `/tmp/nm-wp04-validation`:
 run's `traffic-validation.json`. These whole-interface rates have a different
 scope from the filtered application probe-cost estimates below.
 
-## Release resource measurements
+### Release resource measurements
 
 Both runs met the measured CPU and RSS targets of below 1% of one core and
 below 50 MiB. The selected-filter traffic estimates were also below 10 MB/hour;
@@ -146,7 +214,7 @@ out at 1.5 s and HTTPS at 3 s; DNS resolves `localhost`. It exercises bounded
 timeout behavior without changing the active network. It does not reproduce
 every failure mode of a phone or mobile network.
 
-### Traffic accounting
+#### Traffic accounting
 
 | Metric | Default probes on en0 | Controlled timeouts |
 | --- | ---: | ---: |
@@ -190,7 +258,7 @@ an explicit wire-cost model, not a Wi-Fi measurement. Decimal MB/hour is
 extrapolated from a short run and must not be interpreted as a guaranteed hourly
 maximum or available bandwidth.
 
-## Terminal, shutdown, and storage failures
+### Terminal, shutdown, and storage failures
 
 The packaged executable ran in a real PTY, with ANSI output consumed by pyte and
 rendered to a PNG for visual inspection. The normal full view, failed probes,
@@ -225,7 +293,7 @@ Local evidence: `/tmp/nm-wp04-validation/cleanup-results.json`,
 `runtime-storage-failure` directories. Exact cleanup orchestration is preserved
 locally in `/tmp/nm-wp04-validation/run-cleanup.py`.
 
-## Location evidence
+### Location evidence
 
 The user approved the macOS location prompt for the bundled executable. An early
 native feasibility run returned a fix about 503 s old with roughly 60 m accuracy.
@@ -235,7 +303,7 @@ fix. Stored source and receipt timestamps were checked separately. These
 observations establish permission and real location ingress on this Mac; they do not establish useful continuous positioning on a
 moving train. No coordinates or raw recordings are committed.
 
-## Reproduce
+### Reproduce
 
 The resource/terminal harness requires Python 3, pyte, and Pillow. Run from the
 repository root with a fresh local output directory and disposable database:

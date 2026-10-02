@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Sparkline, Widget},
@@ -23,84 +23,380 @@ pub struct View {
     pub database: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Screen {
+    #[default]
+    Overview,
+    Details,
+}
+
 pub fn draw(frame: &mut Frame<'_>, view: &View) {
+    draw_screen(frame, view, Screen::Overview);
+}
+
+pub fn draw_screen(frame: &mut Frame<'_>, view: &View, screen: Screen) {
     let area = frame.area();
     if area.width < 80 || area.height < 24 {
-        frame.render_widget(Paragraph::new("Terminal too small\nResize to at least 80x24\nRecording continues.\nq quit / Ctrl-C"), area);
-        return;
-    }
-    let rows = Layout::vertical([
-        Constraint::Length(3),
-        Constraint::Min(5),
-        Constraint::Length(2),
-        Constraint::Length(1),
-        Constraint::Length(8),
-        Constraint::Length(3),
-        Constraint::Length(2),
-    ])
-    .split(area);
-    let (status, color) = status_text(view.snapshot.status);
-    let latency_ms = view
-        .snapshot
-        .probes
-        .iter()
-        .filter(|probe| probe.kind == ProbeKind::Tcp && probe.fresh)
-        .filter_map(|probe| probe.observation.as_ref())
-        .filter(|observation| observation.outcome.is_success())
-        .map(|observation| observation.duration_ms)
-        .max();
-    let latency = latency_ms.map_or_else(|| "--".into(), |value| format!("{value}ms"));
-    let label = terminal_text(view.label.as_deref().unwrap_or("Unlabelled ride"));
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled(
-                    format!(" {status} "),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(" Latency: {latency}"),
-                    Style::default()
-                        .fg(if latency_ms.is_some() {
-                            Color::Cyan
-                        } else {
-                            Color::Gray
-                        })
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!(
-                    " (TCP max) | {label} | elapsed {}m {:02}s",
+        let (status, color) = status_text(view.snapshot.status);
+        let latency = current_latency(&view.snapshot)
+            .and_then(|probe| probe.observation.as_ref())
+            .map_or_else(
+                || "--".into(),
+                |observation| observation.duration_ms.to_string(),
+            );
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("Terminal too small"),
+                Line::from("Resize to at least 80x24"),
+                Line::styled(status, Style::default().fg(color)),
+                Line::from(format!("{latency} ms (TCP max)")),
+                Line::from(format!(
+                    "Recording {}m {:02}s",
                     view.elapsed_ms / 60_000,
                     view.elapsed_ms / 1000 % 60
                 )),
+                Line::from("q Quit / Ctrl-C"),
             ]),
-            traffic_headline(&view.snapshot.traffic),
-            Line::from(format!(
-                " Recording {} | display 1Hz | current sampled targets",
-                view.session_id
-            )),
-        ]),
-        rows[0],
+            area,
+        );
+        return;
+    }
+    match screen {
+        Screen::Overview => draw_overview(frame, view),
+        Screen::Details => draw_details(frame, view),
+    }
+}
+
+fn draw_header(frame: &mut Frame<'_>, area: Rect, view: &View, title: &'static str) {
+    let block = Block::default().borders(Borders::BOTTOM);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let columns = Layout::horizontal([Constraint::Length(28), Constraint::Min(0)]).split(inner);
+    frame.render_widget(
+        Paragraph::new(title).style(Style::default().fg(Color::Gray)),
+        columns[0],
     );
+    frame.render_widget(
+        Paragraph::new(terminal_text(
+            view.label.as_deref().unwrap_or("Unlabelled ride"),
+        ))
+        .alignment(Alignment::Right)
+        .style(Style::default().fg(Color::Gray)),
+        columns[1],
+    );
+}
+
+fn draw_footer(frame: &mut Frame<'_>, area: Rect, view: &View, screen: Screen) {
+    let block = Block::default().borders(Borders::TOP);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let controls = match screen {
+        Screen::Overview => "d Details | q Quit / Ctrl-C",
+        Screen::Details => "d Overview / Esc Back | q Quit / Ctrl-C",
+    };
+    let columns = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(controls.len() as u16),
+    ])
+    .split(inner);
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Recording {}m {:02}s",
+            view.elapsed_ms / 60_000,
+            view.elapsed_ms / 1000 % 60
+        )),
+        columns[0],
+    );
+    frame.render_widget(Paragraph::new(controls), columns[1]);
+}
+
+fn current_latency(snapshot: &Snapshot) -> Option<&ProbeState> {
+    snapshot
+        .probes
+        .iter()
+        .filter(|probe| probe.kind == ProbeKind::Tcp && probe.fresh)
+        .filter(|probe| {
+            probe
+                .observation
+                .as_ref()
+                .is_some_and(|observation| observation.outcome.is_success())
+        })
+        .max_by_key(|probe| {
+            probe
+                .observation
+                .as_ref()
+                .map(|observation| observation.duration_ms)
+        })
+}
+
+fn draw_overview(frame: &mut Frame<'_>, view: &View) {
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(20),
+        Constraint::Length(2),
+    ])
+    .split(frame.area());
+    draw_header(frame, rows[0], view, "NETWORK MONITOR");
+    draw_footer(frame, rows[2], view, Screen::Overview);
+    let columns = Layout::horizontal([Constraint::Min(0), Constraint::Length(27)]).split(rows[1]);
+    let graph_rows =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(columns[0]);
     frame.render_widget(
         LatencyGraph {
             history: &view.snapshot.history,
             now_second: view.elapsed_ms / 1000,
         },
+        graph_rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(" + OK  x fail  | gap  . missing\n TCP connection timing"),
+        graph_rows[1],
+    );
+    let block = Block::default().borders(Borders::LEFT);
+    let inner = block.inner(columns[1]);
+    frame.render_widget(block, columns[1]);
+    let sections = Layout::vertical([
+        Constraint::Length(8),
+        Constraint::Length(6),
+        Constraint::Min(6),
+    ])
+    .split(inner);
+    draw_latency(frame, sections[0], &view.snapshot);
+    let (status, color) = status_text(view.snapshot.status);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(" CONNECTION"),
+            Line::from(Span::styled(
+                format!(" {status}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!(" {}", status_reason(view))),
+        ])
+        .block(Block::default().borders(Borders::TOP)),
+        sections[1],
+    );
+    let traffic = &view.snapshot.traffic;
+    let (down, up, status) = traffic_values(traffic);
+    let interface = traffic
+        .interface
+        .as_ref()
+        .map_or_else(|| "--".into(), |interface| terminal_text(&interface.name));
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                format!(" Down: {down} Mbps"),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                format!(" Up: {up} Mbps"),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(format!(" On: {interface}")),
+            Line::from(format!(" {status}")),
+            Line::from(format!(" age {}", age_text(traffic.age_ms))),
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::TOP)
+                .title(" PASSIVE TRAFFIC "),
+        ),
+        sections[2],
+    );
+}
+
+fn status_reason(view: &View) -> String {
+    match view.snapshot.status {
+        Status::Starting => "Waiting for TCP checks".into(),
+        Status::Healthy => "All sampled checks pass".into(),
+        Status::Slow => format!("TCP >= {} ms", view.config.slow_latency_ms),
+        Status::Offline => "Both TCP targets failed".into(),
+        Status::Stale => view
+            .snapshot
+            .probes
+            .iter()
+            .filter(|probe| probe.kind == ProbeKind::Tcp)
+            .find_map(|probe| probe_issue(probe).map(|issue| format!("TCP check {issue}")))
+            .unwrap_or_else(|| "TCP freshness unknown".into()),
+        Status::Partial => {
+            let successful_tcp = view
+                .snapshot
+                .probes
+                .iter()
+                .filter(|probe| probe.kind == ProbeKind::Tcp && probe.fresh)
+                .filter(|probe| {
+                    probe
+                        .observation
+                        .as_ref()
+                        .is_some_and(|observation| observation.outcome.is_success())
+                })
+                .count();
+            match successful_tcp {
+                0 => "TCP failed; HTTPS passed".into(),
+                1 => "One TCP target failed".into(),
+                _ => view
+                    .snapshot
+                    .probes
+                    .iter()
+                    .find_map(|probe| {
+                        let kind = match probe.kind {
+                            ProbeKind::Tcp => "TCP",
+                            ProbeKind::Dns => "DNS",
+                            ProbeKind::Https => "HTTPS",
+                        };
+                        probe_issue(probe).map(|issue| format!("{kind} check {issue}"))
+                    })
+                    .unwrap_or_else(|| "Some checks incomplete".into()),
+            }
+        }
+    }
+}
+
+fn probe_issue(probe: &ProbeState) -> Option<&'static str> {
+    match probe
+        .observation
+        .as_ref()
+        .map(|observation| &observation.outcome)
+    {
+        None => Some("pending"),
+        Some(ProbeOutcome::Unavailable(_)) => Some("unavailable"),
+        Some(ProbeOutcome::Cancelled) => Some("cancelled"),
+        Some(_) if !probe.fresh => Some("stale"),
+        Some(outcome) if !outcome.is_success() => Some("failed"),
+        Some(_) => None,
+    }
+}
+
+fn draw_latency(frame: &mut Frame<'_>, area: Rect, snapshot: &Snapshot) {
+    const DIGIT_ROWS: [[&str; 10]; 5] = [
+        [
+            "111", "010", "111", "111", "101", "111", "111", "111", "111", "111",
+        ],
+        [
+            "101", "110", "001", "001", "101", "100", "100", "001", "101", "101",
+        ],
+        [
+            "101", "010", "111", "111", "111", "111", "111", "001", "111", "111",
+        ],
+        [
+            "101", "010", "100", "001", "001", "001", "101", "001", "101", "001",
+        ],
+        [
+            "111", "111", "111", "111", "001", "111", "111", "001", "111", "111",
+        ],
+    ];
+    let probe = current_latency(snapshot);
+    let latency = probe
+        .and_then(|probe| probe.observation.as_ref())
+        .map_or_else(
+            || "--".into(),
+            |observation| observation.duration_ms.to_string(),
+        );
+    let freshness = probe.and_then(|probe| probe.age_ms).map_or_else(
+        || "No fresh TCP success".into(),
+        |age| format!("Updated {:.1}s ago", age as f64 / 1000.0),
+    );
+    let color = if probe.is_some() {
+        Color::Cyan
+    } else {
+        Color::Gray
+    };
+    let mut lines = vec![Line::from(" LATENCY NOW")];
+    for (row, patterns) in DIGIT_ROWS.iter().enumerate() {
+        let mut line = String::new();
+        if latency.len() <= 5 {
+            for digit in latency.chars() {
+                line.push(' ');
+                let pattern = match digit.to_digit(10) {
+                    Some(digit) => patterns[digit as usize],
+                    None if row == 2 => "111",
+                    None => "000",
+                };
+                line.extend(
+                    pattern
+                        .chars()
+                        .map(|pixel| if pixel == '1' { '\u{2588}' } else { ' ' }),
+                );
+            }
+            if row == 4 {
+                line.push_str(" ms");
+            }
+        } else if row == 2 {
+            line = format!(" {latency} ms");
+        }
+        lines.push(Line::styled(
+            line,
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.push(Line::from(if latency.len() <= 5 {
+        format!(" {latency} ms (TCP max)")
+    } else {
+        " TCP max (fresh)".into()
+    }));
+    lines.push(Line::from(format!(" {freshness}")));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_details(frame: &mut Frame<'_>, view: &View) {
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(8),
+        Constraint::Length(3),
+        Constraint::Length(2),
+        Constraint::Length(2),
+    ])
+    .split(frame.area());
+    draw_header(frame, rows[0], view, "NETWORK MONITOR / DETAILS");
+    let (status, color) = status_text(view.snapshot.status);
+    let latency = current_latency(&view.snapshot)
+        .and_then(|probe| probe.observation.as_ref())
+        .map_or_else(
+            || "--".into(),
+            |observation| format!("{}ms", observation.duration_ms),
+        );
+    let traffic = &view.snapshot.traffic;
+    let (_, _, traffic_status) = traffic_values(traffic);
+    let interface = traffic
+        .interface
+        .as_ref()
+        .map_or_else(|| "--".into(), |interface| terminal_text(&interface.name));
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(
+                    format!(" {status}"),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" | Latency: {latency} (TCP max)")),
+            ]),
+            traffic_headline(traffic),
+            Line::from(format!(
+                " Traffic: age {} {traffic_status} | Interface: {interface}",
+                age_text(traffic.age_ms)
+            )),
+        ]),
         rows[1],
+    );
+    let traffic_rows =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(2)]).split(rows[2]);
+    frame.render_widget(
+        Paragraph::new(" TRAFFIC HISTORY | last 5 minutes | _ zero . missing | gap"),
+        traffic_rows[0],
     );
     frame.render_widget(
         TrafficGraph {
             history: &view.snapshot.history,
             now_second: view.elapsed_ms / 1000,
         },
-        rows[2],
+        traffic_rows[1],
     );
-    frame.render_widget(
-        Paragraph::new(" TCP: + OK x fail | gap . missing | traffic: _ zero . missing | passive"),
-        rows[3],
-    );
-    let mut probes = Vec::with_capacity(8);
+    let mut probes = Vec::with_capacity(9);
     for probe in &view.snapshot.probes {
         let (kind, interval, timeout) = match probe.kind {
             ProbeKind::Tcp => (
@@ -162,7 +458,11 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
             Style::default().fg(color),
         )));
     }
-    frame.render_widget(Paragraph::new(probes), rows[4]);
+    probes.push(Line::from(format!(
+        " display 1Hz | TCP slow >= {}ms | full ride retained",
+        view.config.slow_latency_ms
+    )));
+    frame.render_widget(Paragraph::new(probes), rows[3]);
     let location = match view
         .snapshot
         .location
@@ -205,38 +505,40 @@ pub fn draw(frame: &mut Frame<'_>, view: &View) {
                 .collect::<Vec<_>>(),
         )
         .block(Block::default().borders(Borders::TOP)),
-        rows[5],
+        rows[4],
     );
     frame.render_widget(
         Paragraph::new(vec![
+            Line::from(format!("Recording ID: {}", terminal_text(&view.session_id))),
             Line::from(format!(
                 "Database: {}",
                 terminal_text(&view.database.display().to_string())
             )),
-            Line::from("q quit / Ctrl-C | full ride retained | slow threshold configurable"),
         ]),
-        rows[6],
+        rows[5],
     );
+    draw_footer(frame, rows[6], view, Screen::Details);
 }
 
-fn traffic_headline(state: &TrafficState) -> Line<'static> {
-    let interface = state
-        .interface
-        .as_ref()
-        .map_or_else(|| "--".into(), |interface| terminal_text(&interface.name));
-    let age = state
-        .age_ms
-        .map_or_else(|| "--".into(), |age| format!("{:.1}s", age as f64 / 1000.0));
-    let (down, up, status) = match state.observation.as_ref().map(|event| &event.rate) {
+fn age_text(age_ms: Option<u64>) -> String {
+    age_ms.map_or_else(|| "--".into(), |age| format!("{:.1}s", age as f64 / 1000.0))
+}
+
+fn rate_text(rate: f64) -> String {
+    if rate >= 1_000_000_000.0 {
+        format!("{rate:.2e}")
+    } else {
+        format!("{rate:.2}")
+    }
+}
+
+fn traffic_values(state: &TrafficState) -> (String, String, &'static str) {
+    match state.observation.as_ref().map(|event| &event.rate) {
         Some(TrafficRate::Valid {
             download_mbps,
             upload_mbps,
             ..
-        }) if state.fresh => (
-            format!("{download_mbps:.2}"),
-            format!("{upload_mbps:.2}"),
-            "fresh",
-        ),
+        }) if state.fresh => (rate_text(*download_mbps), rate_text(*upload_mbps), "fresh"),
         rate => (
             "--".into(),
             "--".into(),
@@ -251,7 +553,11 @@ fn traffic_headline(state: &TrafficState) -> Line<'static> {
                 Some(TrafficRate::Baseline) | None => "unknown / baseline",
             },
         ),
-    };
+    }
+}
+
+fn traffic_headline(state: &TrafficState) -> Line<'static> {
+    let (down, up, _) = traffic_values(state);
     Line::from(vec![
         Span::styled(
             format!(" Down: {down} Mbps"),
@@ -265,7 +571,7 @@ fn traffic_headline(state: &TrafficState) -> Line<'static> {
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(" | {interface} | age {age} {status}")),
+        Span::raw(" | passive traffic"),
     ])
 }
 

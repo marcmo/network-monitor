@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::{
     app::Control,
-    ui::{View, draw},
+    ui::{Screen, View, draw_screen},
 };
 
 pub const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -52,6 +52,7 @@ pub fn run(
     let mut guard = TerminalGuard::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
+    let mut screen = Screen::default();
     let mut redraw = true;
     let mut quitting = false;
     while let Ok(changed) = views.has_changed() {
@@ -59,7 +60,7 @@ pub fn run(
         if redraw {
             let view = views.borrow_and_update().clone();
             if let Some(view) = view {
-                terminal.draw(|frame| draw(frame, &view))?;
+                terminal.draw(|frame| draw_screen(frame, &view, screen))?;
             }
             redraw = false;
         }
@@ -75,6 +76,20 @@ pub fn run(
                     let _ = controls.try_send(Control::Quit);
                     quitting = true;
                 }
+                Event::Key(key) if key.kind == KeyEventKind::Press && !quitting => match key.code {
+                    KeyCode::Char('d') => {
+                        screen = match screen {
+                            Screen::Overview => Screen::Details,
+                            Screen::Details => Screen::Overview,
+                        };
+                        redraw = true;
+                    }
+                    KeyCode::Esc if screen == Screen::Details => {
+                        screen = Screen::Overview;
+                        redraw = true;
+                    }
+                    _ => {}
+                },
                 Event::Resize(_, _) => redraw = true,
                 _ => {}
             }

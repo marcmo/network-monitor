@@ -179,3 +179,32 @@ verify deterministic rate arithmetic, invalidation, persistence and terminal UI.
   only when needed for reasoning, with bullets for multiple changes. Allowed
   types: feat, fix, refactor, perf, docs, test, build, ci, chore.
 - Never mention AI tools, assistance, or co-authors in commits or PRs.
+
+## Approved presentation: graph with sidebar (2026-10-02)
+
+The user selected sketch 3, "Graph with sidebar", after reviewing three layout
+alternatives. Make current latency and connection quality legible at a glance.
+The primary screen has a large five-minute TCP latency Sparkline on the left and
+an always-visible fixed sidebar on the right: large numeric latency with ms,
+freshness, a colored and textual quality state with a short factual reason, and
+current passive Down/Up Mbps with the measured interface. Keep the ride label
+and recording duration in a quiet header/footer. Hide raw targets, cadence,
+location, recording identifiers/path and traffic history under a Details view,
+toggled by d; Escape returns to the primary screen. Preserve q/Ctrl-C/signals.
+
+Use the existing status and latency semantics: highest fresh successful TCP
+latency, explicit unknown when none exists, separate partial/slow/offline/stale
+states, and traffic activity independent of connectivity. Never invent scores,
+capacity estimates or a stale zero. Details retain the existing diagnostic and
+traffic-history information. The selected sketch is a layout reference, not
+live data or a new measurement specification.
+
+Keep sampling, recording and timing unchanged. Own presentation state on the
+terminal thread; do not add shared state or move UI choices into the data actor.
+Both screens must work at 80x24, preserve untrusted-text sanitization, and handle
+small terminals, long labels and large/unknown values without hiding the key
+reading, status, recording duration or quit controls. Test through the existing
+rendering and real-terminal seams, including all quality/freshness states and
+Details toggling. Run full tests, format, Clippy, release packaging, and targeted
+PTY checks; do not repeat the previous five-minute resource measurements unless
+an observed regression requires it.

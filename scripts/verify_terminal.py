@@ -130,11 +130,14 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--quit", choices=["q", "ctrl-c", "SIGINT", "SIGTERM", "SIGHUP"], default="q")
     parser.add_argument("--resize", action="store_true")
+    parser.add_argument("--exercise-details", action="store_true", help="exercise d/Escape and resize, saving intermediate screens; requires >=18 seconds")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command or args.duration <= 0 or args.startup_timeout <= 0:
         parser.error("a command and positive duration/startup timeout are required")
+    if args.exercise_details and args.duration < 18:
+        parser.error("--exercise-details requires --duration of at least 18 seconds")
     output = Path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     master, slave = pty.openpty()
@@ -175,6 +178,31 @@ def main():
     samples = []
     raw = bytearray()
     resized = False
+    interactions = []
+    steps = [
+        (1, "capture", "overview-120"),
+        (2, "key", "d"),
+        (3, "capture", "details-120"),
+        (4, "key", "escape"),
+        (5, "capture", "overview-120-escape"),
+        (6, "key", "d"),
+        (7, "capture", "details-120-again"),
+        (8, "key", "d"),
+        (9, "capture", "overview-120-toggle"),
+        (10, "resize", "80x24"),
+        (11, "capture", "overview-80"),
+        (12, "key", "d"),
+        (13, "capture", "details-80"),
+        (14, "key", "escape"),
+        (15, "capture", "overview-80-escape"),
+        (16, "key", "d"),
+    ] if args.exercise_details else []
+
+    def resize_terminal():
+        (output / "before-resize.txt").write_text("\n".join(screen.display))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        screen.resize(24, 80)
+        os.kill(application_pid, signal.SIGWINCH)
 
     def receive(timeout):
         ready, _, _ = select.select([master], [], [], timeout)
@@ -191,7 +219,10 @@ def main():
             receive(0.5)
             now = time.monotonic()
             if started is None:
-                if any(" Recording " in line and "display 1Hz" in line for line in screen.display):
+                rendered = "\n".join(screen.display)
+                if any(" Recording " in line and "display 1Hz" in line for line in screen.display) or (
+                    "NETWORK MONITOR" in rendered and "Recording" in rendered
+                ):
                     started = now
                     active_path.write_text(json.dumps({"pid": application_pid, "monotonic_s": started, "startup_s": started - spawned}))
                 elif now - spawned >= args.startup_timeout:
@@ -204,13 +235,24 @@ def main():
             if value:
                 value["elapsed_s"] = now - started
                 samples.append(value)
-            if args.resize and not resized and now - started > args.duration / 2:
-                (output / "before-resize.txt").write_text("\n".join(screen.display))
-                fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
-                screen.resize(24, 80)
-                os.kill(application_pid, signal.SIGWINCH)
+            if steps and now - started >= steps[0][0]:
+                _, action, value = steps.pop(0)
+                if action == "key":
+                    os.write(master, b"\x1b" if value == "escape" else value.encode("ascii"))
+                elif action == "resize":
+                    resize_terminal()
+                    resized = True
+                else:
+                    destination = output / value
+                    destination.mkdir(exist_ok=True)
+                    save_screen(screen, destination)
+                interactions.append({"elapsed_s": now - started, "action": action, "value": value})
+            if args.resize and not args.exercise_details and not resized and now - started > args.duration / 2:
+                resize_terminal()
                 resized = True
         save_screen(screen, output)
+        if args.exercise_details:
+            (output / "interaction-log.json").write_text(json.dumps({"actions": interactions, "pending": steps}, indent=2))
         quit_start = time.monotonic()
         if process.poll() is None:
             if args.quit.startswith("SIG"):

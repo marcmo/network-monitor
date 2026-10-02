@@ -21,6 +21,7 @@ verifies an ad-hoc signature. The package contains one executable and has no
 application helper process. Launch the executable from your terminal; keep the
 terminal open while recording. Every launch starts a new session. Use a terminal
 of at least 80 columns by 24 rows; recording continues if it becomes smaller.
+Press `d` to toggle Details and `Esc` to return to the overview.
 Press `q` or Ctrl-C to finish and restore the terminal. SIGINT, SIGTERM, and SIGHUP
 also request an orderly shutdown.
 
@@ -102,7 +103,17 @@ Only one system DNS worker exists, with a bounded mailbox. An uncancellable
 create an accumulating pool of stuck resolver threads. All probes have bounded
 application deadlines and no application retry loops.
 
-## Five-minute display
+## Graph and current connection
+
+The overview puts the five-minute latency graph on the left and a fixed sidebar
+on the right. The sidebar keeps the current TCP latency, freshness, connection
+quality and its reason, and passive Down/Up Mbps together. The recording duration
+and quit controls stay visible even with a long ride label.
+
+Press `d` for the full Details view: individual targets, outcomes, cadence,
+deadlines, freshness, traffic history, location/source age, session identifier,
+and database path. Press `d` again or `Esc` to return. Both views update live;
+opening Details does not pause sampling or recording.
 
 The graph shows the last 300 elapsed seconds and advances once per second,
 including during an outage or while no observations are arriving. Missing
@@ -116,8 +127,9 @@ is compressed. Empty buckets stay blank. The row below uses `+` for success,
 over gaps or successes sharing a column; the latency bar can still show a
 successful probe in that same bucket. A zero-millisecond result remains visible
 as `+` without inventing a positive latency.
-The headline shows the highest fresh, successful TCP latency, or `--` when no
-current successful TCP timing is available.
+The sidebar shows the highest fresh, successful TCP latency, or `--` when no
+current successful TCP timing is available. Large values retain an explicit
+`ms` unit and fall back to a compact readout when necessary.
 
 ## Passive download and upload traffic
 
@@ -137,8 +149,8 @@ counters, suspension, unavailable readings, or stale observations invalidate the
 rate; a new valid sample pair is required. An observed zero rate is different
 from an unknown rate. Raw counters and timestamps are retained with the ride.
 
-The compact Down and Up sparklines cover the same five-minute window and retain
-the highest rate in each display column. Each has its own labeled Mbps scale.
+In Details, the compact Down and Up sparklines cover the same five-minute window
+and retain the highest rate in each display column. Each has its own labeled Mbps scale.
 `_` marks measured zero, `.` missing data, and `|` an explicit gap without a
 measurement. Changing the interface clears the live traffic plots so their
 scope matches the displayed interface; earlier raw events remain recorded.
@@ -240,7 +252,8 @@ commands, terminal cleanup results, and limits of the evidence. Resource targets
 are below 1% of one CPU core, 50 MiB resident memory, and 10 MB/hour of application
 probe traffic. Traffic estimates describe probe cost, not available bandwidth.
 
-On this Mac, two 315 s release runs with passive traffic and sparklines measured
+The resource baseline at `ab1b728` used two 315 s release runs with passive
+traffic and sparklines. On this Mac they measured
 0.114% CPU / 16.66 MiB maximum RSS on the current `en0` network and 0.104% /
 14.73 MiB under controlled timeouts. Filtered captures estimated 2.78 and
 2.42 MB/hour including modeled Ethernet overhead. These short estimates include
