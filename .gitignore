@@ -1,0 +1,4 @@
+/target/
+/IMPL_LEDGER.md
+*.sqlite*
+.DS_Store
