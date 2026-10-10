@@ -203,6 +203,112 @@ fn is_bar(symbol: &str) -> bool {
 }
 
 #[test]
+fn latency_history_scrolls_as_one_shape_without_new_measurements() {
+    let mut view = empty_view();
+    view.snapshot.history = [101, 109, 124, 153, 184, 202, 245]
+        .into_iter()
+        .zip([50, 75, 100, 125, 150, 175, 250])
+        .map(|(elapsed_second, latency_ms)| GraphPoint {
+            elapsed_second,
+            latency_ms: Some(latency_ms),
+            successes: 1,
+            failures: u32::from(elapsed_second == 153),
+            explicit_gap: elapsed_second == 184,
+            ..GraphPoint::default()
+        })
+        .collect();
+    for width in [80, 120, 328, 329, 360] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        let mut original = None;
+        let mut previous_first = None;
+        for second in 300..=330 {
+            view.elapsed_ms = second * 1000;
+            terminal.draw(|frame| draw(frame, &view)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let (plot, baseline) = latency_plot(buffer);
+            let first = (plot.x..plot.right())
+                .find(|x| buffer[(*x, baseline)].symbol() != ".")
+                .unwrap();
+            let shape: Vec<_> = (plot.x..plot.right())
+                .filter(|x| buffer[(*x, baseline)].symbol() != ".")
+                .map(|x| {
+                    (
+                        x - first,
+                        (plot.y..=baseline)
+                            .map(|y| buffer[(x, y)].clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
+            assert_eq!(shape.len(), 7, "all seven historical bars remain visible");
+            if let Some((original_first, expected)) = &original {
+                assert_eq!(&shape, expected, "historical shape changed at {second}s");
+                assert!(first <= previous_first.unwrap());
+                if second == 330 {
+                    assert!(first < *original_first, "history must scroll, not freeze");
+                }
+            } else {
+                original = Some((first, shape));
+            }
+            previous_first = Some(first);
+        }
+    }
+}
+
+#[test]
+fn traffic_history_scrolls_as_one_shape_without_new_measurements() {
+    let mut view = empty_view();
+    view.snapshot.history = [101, 109, 124, 153, 184, 202, 245]
+        .into_iter()
+        .zip([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+        .map(|(elapsed_second, rate)| GraphPoint {
+            elapsed_second,
+            download_mbps: Some(rate),
+            upload_mbps: Some(8.0 - rate),
+            ..GraphPoint::default()
+        })
+        .collect();
+    for width in [80, 120, 322, 323, 360] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        let mut original = None;
+        for second in 300..=330 {
+            view.elapsed_ms = second * 1000;
+            terminal
+                .draw(|frame| draw_screen(frame, &view, Screen::Details))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let shapes: Vec<_> = [" Down 0..", " Up 0.."]
+                .into_iter()
+                .map(|label| {
+                    let row = buffer
+                        .content
+                        .chunks(usize::from(width))
+                        .find(|row| {
+                            row.iter()
+                                .map(|cell| cell.symbol())
+                                .collect::<String>()
+                                .starts_with(label)
+                        })
+                        .unwrap();
+                    let first = row.iter().position(|cell| is_bar(cell.symbol())).unwrap();
+                    row.iter()
+                        .enumerate()
+                        .filter(|(_, cell)| is_bar(cell.symbol()))
+                        .map(|(x, cell)| (x - first, cell.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert!(shapes.iter().all(|shape| shape.len() == 7));
+            if let Some(expected) = &original {
+                assert_eq!(&shapes, expected, "traffic shape changed at {second}s");
+            } else {
+                original = Some(shapes);
+            }
+        }
+    }
+}
+
+#[test]
 fn narrow_sparkline_keeps_peaks_and_failures_when_samples_share_a_column() {
     let config = Config::default();
     let mut monitor = Monitor::new(config.clone());
@@ -223,7 +329,7 @@ fn narrow_sparkline_keeps_peaks_and_failures_when_samples_share_a_column() {
             ..GraphPoint::default()
         },
     ];
-    let view = View {
+    let mut view = View {
         snapshot,
         config,
         utc: Utc::now(),
@@ -233,18 +339,28 @@ fn narrow_sparkline_keeps_peaks_and_failures_when_samples_share_a_column() {
         database: "rides.sqlite3".into(),
     };
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-    terminal.draw(|frame| draw(frame, &view)).unwrap();
-    let buffer = terminal.backend().buffer();
-    let (plot, baseline) = latency_plot(buffer);
-    let failure_columns: Vec<_> = (plot.x..plot.right())
-        .filter(|x| buffer[(*x, baseline)].symbol() == "x")
-        .collect();
-    assert_eq!(failure_columns.len(), 1);
-    let x = failure_columns[0];
-    assert_eq!(buffer[(x, plot.y)].symbol(), "\u{2588}");
-    assert_eq!(buffer[(x, plot.y)].fg, ratatui::style::Color::Cyan);
-    assert_eq!(buffer[(x + 1, plot.y)].symbol(), " ");
-    assert_eq!(buffer[(x, baseline)].fg, ratatui::style::Color::Red);
+    for second in 300..=330 {
+        view.elapsed_ms = second * 1000;
+        terminal.draw(|frame| draw(frame, &view)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let (plot, baseline) = latency_plot(buffer);
+        let failure_columns: Vec<_> = (plot.x..plot.right())
+            .filter(|x| buffer[(*x, baseline)].symbol() == "x")
+            .collect();
+        assert_eq!(failure_columns.len(), 1);
+        let x = failure_columns[0];
+        assert_eq!(buffer[(x, plot.y)].symbol(), "\u{2588}");
+        assert_eq!(buffer[(x, plot.y)].fg, ratatui::style::Color::Cyan);
+        assert_eq!(buffer[(x + 1, plot.y)].symbol(), " ");
+        assert_eq!(buffer[(x, baseline)].fg, ratatui::style::Color::Red);
+        assert_eq!(
+            (plot.x..plot.right())
+                .filter(|x| is_bar(buffer[(*x, plot.bottom() - 1)].symbol()))
+                .count(),
+            1,
+            "samples sharing a completed bucket must not separate later"
+        );
+    }
 }
 
 #[test]
@@ -281,7 +397,14 @@ fn zero_latency_is_a_success_and_expires_as_the_sparkline_window_advances() {
     assert_eq!(buffer[(plot.right() - 1, plot.bottom() - 1)].symbol(), " ");
     assert_eq!(buffer[(plot.right() - 2, baseline)].symbol(), ".");
 
-    view.elapsed_ms = 601_000;
+    view.elapsed_ms = 599_000;
+    view.snapshot = monitor.snapshot(view.elapsed_ms);
+    terminal.draw(|frame| draw(frame, &view)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let (plot, baseline) = latency_plot(buffer);
+    assert_eq!(buffer[(plot.x, baseline)].symbol(), "+");
+
+    view.elapsed_ms = 600_000;
     view.snapshot = monitor.snapshot(view.elapsed_ms);
     terminal.draw(|frame| draw(frame, &view)).unwrap();
     let buffer = terminal.backend().buffer();

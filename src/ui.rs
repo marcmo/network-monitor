@@ -592,11 +592,11 @@ impl Widget for TrafficGraph<'_> {
             let mut values: Vec<Option<f64>> = vec![None; usize::from(plot.width)];
             let mut gaps = vec![false; usize::from(plot.width)];
             for point in self.history {
-                let age = self.now_second.saturating_sub(point.elapsed_second);
-                if age > 299 {
+                let Some(offset) =
+                    history_column(point.elapsed_second, self.now_second, plot.width)
+                else {
                     continue;
-                }
-                let offset = ((299 - age) * u64::from(plot.width - 1) / 299) as usize;
+                };
                 gaps[offset] |= point.explicit_gap;
                 if let Some(value) = if download {
                     point.download_mbps
@@ -672,6 +672,17 @@ struct LatencyGraph<'a> {
     now_second: u64,
 }
 
+fn history_column(second: u64, now_second: u64, width: u16) -> Option<usize> {
+    let age = now_second.checked_sub(second)?;
+    if age > 299 || width == 0 {
+        return None;
+    }
+    let last = u128::from(width - 1);
+    // Fixed elapsed-time buckets keep old peaks together as the window scrolls.
+    let bucket = |second| u128::from(second) * last / 299;
+    Some((last - (bucket(now_second) - bucket(second))) as usize)
+}
+
 impl Widget for LatencyGraph<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
         let maximum = self
@@ -696,11 +707,10 @@ impl Widget for LatencyGraph<'_> {
             buffer[(x, baseline)].set_symbol(".").set_fg(Color::Gray);
         }
         for point in self.history {
-            let age = self.now_second.saturating_sub(point.elapsed_second);
-            if age > 299 {
+            let Some(offset) = history_column(point.elapsed_second, self.now_second, inner.width)
+            else {
                 continue;
-            }
-            let offset = (299 - age) * u64::from(inner.width.saturating_sub(1)) / 299;
+            };
             let x = inner.x + offset as u16;
             if point.explicit_gap && buffer[(x, baseline)].symbol() != "x" {
                 buffer[(x, baseline)].set_symbol("|").set_fg(Color::Gray);
@@ -711,7 +721,7 @@ impl Widget for LatencyGraph<'_> {
                 buffer[(x, baseline)].set_symbol("+").set_fg(Color::Cyan);
             }
             if let Some(latency) = point.latency_ms {
-                let column = &mut latencies[offset as usize];
+                let column = &mut latencies[offset];
                 *column = Some(column.map_or(latency, |old| old.max(latency)));
             }
         }

@@ -120,14 +120,18 @@ deadlines, freshness, traffic history, location/source age, session identifier,
 and database path. Press `d` again or `Esc` to return. Both views update live;
 opening Details does not pause sampling or recording.
 
-The graph shows the last 300 elapsed seconds and advances once per second,
+The graph shows the last 300 elapsed seconds and refreshes once per second,
 including during an outage or while no observations are arriving. Missing
 observations and explicit gaps are different from measured failures. Latencies
 are connection timings, not ICMP round-trip measurements.
 
 Ratatui sparklines draw the latency bars. Each terminal column shows the highest
 observed TCP latency in its time bucket, preserving short spikes when the window
-is compressed. Empty buckets stay blank. The row below uses `+` for success,
+is compressed. Buckets are anchored to session elapsed time, so completed columns
+scroll left together without regrouping old measurements. On narrow terminals,
+scrolling takes steps of several seconds; current readings still refresh every
+second. Resizing recalculates buckets for the new width. Empty buckets stay blank.
+The row below uses `+` for success,
 `x` for failure, `|` for a gap, and `.` for no observation. Failures take precedence
 over gaps or successes sharing a column; the latency bar can still show a
 successful probe in that same bucket. A zero-millisecond result remains visible
