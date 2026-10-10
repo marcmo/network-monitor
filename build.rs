@@ -1,6 +1,7 @@
 fn main() {
     println!("cargo:rerun-if-changed=native/location.m");
     println!("cargo:rerun-if-changed=native/traffic.c");
+    println!("cargo:rerun-if-changed=native/wifi.m");
     println!("cargo:rerun-if-changed=native/Info.plist");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
@@ -17,6 +18,13 @@ fn main() {
         .warnings(true)
         .extra_warnings(true)
         .compile("network_monitor_traffic");
+    cc::Build::new()
+        .file("native/wifi.m")
+        .flag("-fobjc-arc")
+        .warnings(true)
+        .extra_warnings(true)
+        .compile("network_monitor_wifi");
+    println!("cargo:rustc-link-lib=framework=CoreWLAN");
     println!("cargo:rustc-link-lib=framework=SystemConfiguration");
     println!("cargo:rustc-link-lib=framework=CoreLocation");
     println!("cargo:rustc-link-lib=framework=Foundation");

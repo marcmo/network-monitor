@@ -14,6 +14,7 @@ use crate::{
     storage::{Recorder, Session, StorageError, TryRecordError},
     traffic::TrafficSource,
     ui::View,
+    wifi::{NoWifi, WifiSource},
 };
 
 pub struct AppOptions {
@@ -58,6 +59,17 @@ pub async fn run_session<P: ProbeRunner, T: TrafficSource, C: Clock>(
     runner: P,
     traffic: T,
     clock: C,
+    ports: AppPorts,
+) -> Result<(), AppError> {
+    run_session_with_wifi(options, runner, traffic, None::<NoWifi>, clock, ports).await
+}
+
+pub async fn run_session_with_wifi<P: ProbeRunner, T: TrafficSource, W: WifiSource, C: Clock>(
+    options: AppOptions,
+    runner: P,
+    traffic: T,
+    wifi: Option<W>,
+    clock: C,
     mut ports: AppPorts,
 ) -> Result<(), AppError> {
     if let Some(parent) = options
@@ -78,7 +90,7 @@ pub async fn run_session<P: ProbeRunner, T: TrafficSource, C: Clock>(
     let mut sampler = tokio::spawn(run_sampler_with_refresh(
         options.config.clone(),
         runner,
-        traffic,
+        (traffic, wifi),
         clock.clone(),
         events_tx,
         stop_rx,

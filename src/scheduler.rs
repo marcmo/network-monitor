@@ -12,11 +12,60 @@ use crate::{
     config::{Config, ConfigError},
     model::*,
     traffic::{NoTraffic, Rates, Sample, TrafficSource, TrafficSourceError},
+    wifi::{NoWifi, WIFI_INTERVAL_MS, WIFI_TIMEOUT_MS, WifiSnapshot, WifiSource},
 };
 
 pub const EVENT_QUEUE_CAPACITY: usize = 128;
 // Separate clock reads and millisecond rounding must not be mistaken for a suspend.
 const SUSPEND_CLOCK_TOLERANCE_MS: u64 = 50;
+
+struct WifiSample {
+    started: ClockReading,
+    ended: ClockReading,
+    generation: u64,
+    snapshot: Option<WifiSnapshot>,
+    quality: WifiSampleQuality,
+}
+
+impl WifiSample {
+    fn into_event(self, now: &ClockReading, generation: u64) -> Event {
+        let duration = self
+            .ended
+            .elapsed_ms
+            .saturating_sub(self.started.elapsed_ms);
+        let awake_duration = self
+            .ended
+            .awake_elapsed_ms
+            .saturating_sub(self.started.awake_elapsed_ms);
+        let quality = if self.quality != WifiSampleQuality::Valid {
+            self.quality
+        } else if self.generation != generation
+            || duration.saturating_sub(awake_duration) > SUSPEND_CLOCK_TOLERANCE_MS
+        {
+            WifiSampleQuality::Gap
+        } else if self.ended.elapsed_ms < self.started.elapsed_ms
+            || now.elapsed_ms < self.ended.elapsed_ms
+        {
+            WifiSampleQuality::OutOfOrder
+        } else if duration > WIFI_TIMEOUT_MS
+            || now.elapsed_ms - self.ended.elapsed_ms > WIFI_TIMEOUT_MS
+        {
+            WifiSampleQuality::Late
+        } else {
+            self.quality
+        };
+        Event::Wifi(WifiEvent {
+            at: Stamp {
+                utc: self.ended.utc,
+                elapsed_ms: self.ended.elapsed_ms,
+                generation: self.generation,
+            },
+            started_elapsed_ms: self.started.elapsed_ms,
+            snapshot: self.snapshot,
+            quality,
+        })
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ProbeSpec {
@@ -201,7 +250,7 @@ pub async fn run_sampler_with<P: ProbeRunner, C: Clock>(
     run_sampler(
         config,
         runner,
-        None::<NoTraffic>,
+        (None::<NoTraffic>, None::<NoWifi>),
         clock,
         events,
         shutdown,
@@ -218,13 +267,47 @@ pub async fn run_sampler_with_traffic<P: ProbeRunner, T: TrafficSource, C: Clock
     events: mpsc::Sender<Event>,
     shutdown: watch::Receiver<bool>,
 ) -> Result<(), SamplerError> {
-    run_sampler(config, runner, Some(traffic), clock, events, shutdown, None).await
+    run_sampler(
+        config,
+        runner,
+        (Some(traffic), None::<NoWifi>),
+        clock,
+        events,
+        shutdown,
+        None,
+    )
+    .await
 }
 
-pub(crate) async fn run_sampler_with_refresh<P: ProbeRunner, T: TrafficSource, C: Clock>(
+pub async fn run_sampler_with_wifi<P: ProbeRunner, W: WifiSource, C: Clock>(
     config: Config,
     runner: P,
-    traffic: T,
+    wifi: W,
+    clock: C,
+    events: mpsc::Sender<Event>,
+    shutdown: watch::Receiver<bool>,
+) -> Result<(), SamplerError> {
+    run_sampler(
+        config,
+        runner,
+        (None::<NoTraffic>, Some(wifi)),
+        clock,
+        events,
+        shutdown,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn run_sampler_with_refresh<
+    P: ProbeRunner,
+    T: TrafficSource,
+    W: WifiSource,
+    C: Clock,
+>(
+    config: Config,
+    runner: P,
+    sources: (T, Option<W>),
     clock: C,
     events: mpsc::Sender<Event>,
     shutdown: watch::Receiver<bool>,
@@ -233,7 +316,7 @@ pub(crate) async fn run_sampler_with_refresh<P: ProbeRunner, T: TrafficSource, C
     run_sampler(
         config,
         runner,
-        Some(traffic),
+        (Some(sources.0), sources.1),
         clock,
         events,
         shutdown,
@@ -242,16 +325,17 @@ pub(crate) async fn run_sampler_with_refresh<P: ProbeRunner, T: TrafficSource, C
     .await
 }
 
-async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
+async fn run_sampler<P: ProbeRunner, T: TrafficSource, W: WifiSource, C: Clock>(
     config: Config,
     runner: P,
-    traffic: Option<T>,
+    sources: (Option<T>, Option<W>),
     clock: C,
     events: mpsc::Sender<Event>,
     mut shutdown: watch::Receiver<bool>,
     mut refresh: Option<mpsc::Receiver<oneshot::Sender<ClockReading>>>,
 ) -> Result<(), SamplerError> {
     config.validate()?;
+    let (traffic, wifi) = sources;
     let specs = probe_specs(&config);
     let mut next_due = vec![Instant::now(); specs.len()];
     let mut running = vec![false; specs.len()];
@@ -265,6 +349,9 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
     let mut traffic_due = Instant::now();
     let mut rates = Rates::default();
     let mut pending_traffic = None;
+    let mut wifi_tasks = JoinSet::new();
+    let mut wifi_due = Instant::now();
+    let mut pending_wifi = None;
     let result = 'sampling: loop {
         if *shutdown.borrow() {
             break Ok(());
@@ -273,6 +360,7 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
             Tick,
             Shutdown,
             Traffic(Option<Result<Sample, tokio::task::JoinError>>),
+            Wifi(Option<Result<WifiSample, tokio::task::JoinError>>),
             Probe(Option<Result<(usize, Observation), tokio::task::JoinError>>),
             Refresh(Option<oneshot::Sender<ClockReading>>),
         }
@@ -281,6 +369,7 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
             .zip(&running)
             .filter_map(|(due, running)| (!running).then_some(*due))
             .chain((traffic.is_some() && traffic_tasks.is_empty()).then_some(traffic_due))
+            .chain((wifi.is_some() && wifi_tasks.is_empty()).then_some(wifi_due))
             .min();
         let wake = tokio::select! {
             biased;
@@ -300,6 +389,7 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
             _ = heartbeat.tick() => Wake::Tick,
             result = tasks.join_next(), if !tasks.is_empty() => Wake::Probe(result),
             result = traffic_tasks.join_next(), if !traffic_tasks.is_empty() => Wake::Traffic(result),
+            result = wifi_tasks.join_next(), if !wifi_tasks.is_empty() => Wake::Wifi(result),
         };
         let refresh_reply = match wake {
             Wake::Shutdown => break Ok(()),
@@ -324,7 +414,15 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
                 }
                 None
             }
-            Wake::Tick | Wake::Probe(None) | Wake::Traffic(None) => None,
+            Wake::Wifi(Some(result)) => {
+                match result {
+                    Ok(completed) => pending_wifi = Some(completed),
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => break Err(SamplerError::Task(error.to_string())),
+                }
+                None
+            }
+            Wake::Tick | Wake::Probe(None) | Wake::Traffic(None) | Wake::Wifi(None) => None,
         };
         let now = clock.reading();
         let elapsed_delta = now.elapsed_ms.saturating_sub(previous.elapsed_ms);
@@ -394,6 +492,11 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
         {
             break Err(error);
         }
+        if let Some(sample) = pending_wifi.take()
+            && let Err(error) = emit(&events, sample.into_event(&now, generation))
+        {
+            break Err(error);
+        }
         if traffic_tasks.is_empty()
             && traffic_due <= Instant::now()
             && let Some(source) = &traffic
@@ -419,6 +522,40 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
                     ended: clock.reading(),
                     generation,
                     counters,
+                }
+            });
+        }
+        if wifi_tasks.is_empty()
+            && wifi_due <= Instant::now()
+            && let Some(source) = &wifi
+        {
+            wifi_due = Instant::now() + Duration::from_millis(WIFI_INTERVAL_MS);
+            let source = source.clone();
+            let clock = clock.clone();
+            wifi_tasks.spawn(async move {
+                let started = clock.reading();
+                let (snapshot, quality) = match tokio::time::timeout(
+                    Duration::from_millis(WIFI_TIMEOUT_MS),
+                    source.sample(),
+                )
+                .await
+                {
+                    Ok(Ok(snapshot)) => (Some(snapshot), WifiSampleQuality::Valid),
+                    Ok(Err(error)) => (
+                        None,
+                        WifiSampleQuality::Unavailable {
+                            reason: error.to_string(),
+                        },
+                    ),
+                    Err(_) => (None, WifiSampleQuality::Timeout),
+                };
+                let ended = clock.reading();
+                WifiSample {
+                    started,
+                    ended,
+                    generation,
+                    snapshot,
+                    quality,
                 }
             });
         }
@@ -484,6 +621,7 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
     };
     tasks.abort_all();
     traffic_tasks.abort_all();
+    wifi_tasks.abort_all();
     let mut undelivered = Vec::new();
     let mut result = match result {
         Err(SamplerError::Overloaded(events)) => {
@@ -518,6 +656,23 @@ async fn run_sampler<P: ProbeRunner, T: TrafficSource, C: Clock>(
     while let Some(completed) = traffic_tasks.join_next().await {
         if let Ok(sample) = completed {
             let event = Event::Traffic(rates.observe(sample, &clock.reading(), generation));
+            if undelivered.is_empty() {
+                match emit(&events, event) {
+                    Err(SamplerError::Overloaded(events)) => undelivered.extend(events),
+                    Err(error) => result = Err(error),
+                    Ok(()) => {}
+                }
+            } else {
+                undelivered.push(event);
+            }
+        }
+    }
+    if let Some(sample) = pending_wifi.take() {
+        undelivered.push(sample.into_event(&clock.reading(), generation));
+    }
+    while let Some(completed) = wifi_tasks.join_next().await {
+        if let Ok(sample) = completed {
+            let event = sample.into_event(&clock.reading(), generation);
             if undelivered.is_empty() {
                 match emit(&events, event) {
                     Err(SamplerError::Overloaded(events)) => undelivered.extend(events),

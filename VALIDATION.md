@@ -1,5 +1,46 @@
 # Validation
 
+## Wi-Fi connection tracing (2026-10-10)
+
+Added passive, one-second CoreWLAN/SystemConfiguration observations to each ride's
+existing SQLite event stream. Wi-Fi state is separate from internet probe health.
+The new source does not scan, reconnect, or mutate network settings. Source tests
+and trace integration tests cover missing SSID while associated, inactive links,
+empty interface lists, read failures, recovery, cancellation, bounded queues,
+timeout jitter, late reads, sleep-spanning observations, overload salvage, and
+persistence alongside the existing events.
+
+All 75 tests passed with `CARGO_INCREMENTAL=0 cargo test --all-targets`.
+`CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings`,
+`cargo fmt --all -- --check`, and `git diff --check` passed. Release packaging
+and ad-hoc signature verification also passed. An independent review found a
+timeout processed at 501 ms was incorrectly relabeled late; the regression
+failed before the fix and passes with the actual source outcome preserved.
+
+Two packaged real-PTY runs each recorded for approximately 65 active seconds.
+Both saved 66 valid Wi-Fi snapshots, each reporting an associated station and an
+active link, with SSID/BSSID unavailable. Native reads took 3-22 ms in the default
+probe run and 3-25 ms in the controlled-timeout run. The default run observed
+mostly failed internet probes; it is not evidence of healthy internet access.
+The timeout fixture used filled loopback listen queues without disrupting Wi-Fi.
+
+Both runs exited with code 0, closed their SQLite sessions, restored terminal
+flags, and left the alternate screen. The default run completed all 16 existing
+Details/Escape/resize/capture interactions at 120x34 and 80x24 and quit with `q`.
+The controlled-timeout run quit with SIGTERM. All fixture processes were stopped.
+
+After the harness's warmup exclusion, roughly 55 seconds of measurements showed
+0.257% / 0.261% of one CPU core and maximum RSS of 17.78 / 16.77 MiB respectively.
+These are short process-level samples, not battery, system-daemon overhead, or
+long-ride measurements. Probe traffic was not remeasured; no probes were added.
+Physical Wi-Fi disconnection, radio power changes, and sleep/resume were not
+triggered. These transitions have controlled-source coverage; actual iPhone
+dropout behavior and access to permission-protected identity fields remain
+unverified. Polling can miss transitions shorter than one second.
+
+Local evidence: `/tmp/nm-wifi-tests.log`, `/tmp/nm-wifi-validation-live`, and
+`/tmp/nm-wifi-validation-timeout`. Raw recordings and identifiers are not committed.
+
 ## Synchronized sparkline scrolling
 
 The scrolling fix follows `742c0aa`. The previous renderer rounded each sample's

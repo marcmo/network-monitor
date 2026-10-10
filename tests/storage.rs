@@ -2,6 +2,49 @@ use chrono::Utc;
 use network_monitor::{config::Config, model::*, storage::*};
 
 #[tokio::test]
+async fn wifi_observations_round_trip_with_probe_events_and_preserve_hidden_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("rides.sqlite3");
+    let session = Session::new(Some("hotspot ride".into()), &Config::default()).unwrap();
+    let id = session.id.clone();
+    let recorder = Recorder::open(&path, session).await.unwrap();
+    let payload = serde_json::json!({
+        "event": "wifi",
+        "data": {
+            "at": {"utc": "2026-10-10T06:00:00Z", "elapsed_ms": 600_001, "generation": 2},
+            "started_elapsed_ms": 600_000,
+            "snapshot": {"interfaces": [{
+                "name": "en0", "power_reported_on": true, "mode": "station",
+                "link": {"type": "active"}, "ssid": null, "bssid": null
+            }]},
+            "quality": {"type": "valid"}
+        }
+    });
+    let wifi: Event = serde_json::from_value(payload.clone()).unwrap();
+    recorder.record(wifi).await.unwrap();
+    let probe = Event::Probe(Observation {
+        at: Stamp {
+            utc: "2026-10-10T06:00:00Z".parse().unwrap(),
+            elapsed_ms: 600_100,
+            generation: 2,
+        },
+        started_elapsed_ms: 600_000,
+        duration_ms: 100,
+        kind: ProbeKind::Tcp,
+        target: "1.1.1.1:443".into(),
+        outcome: ProbeOutcome::Timeout,
+    });
+    recorder.record(probe.clone()).await.unwrap();
+    recorder.finish(Utc::now()).await.unwrap();
+
+    let events = read_events(&path, &id).unwrap();
+    assert_eq!(events.len(), 2);
+    assert_eq!(serde_json::to_value(&events[0]).unwrap(), payload);
+    assert_eq!(events[1], probe);
+    assert!(read_sessions(path).unwrap()[0].ended_utc.is_some());
+}
+
+#[tokio::test]
 async fn separate_launches_persist_full_rides_and_source_location_time() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rides.sqlite3");
