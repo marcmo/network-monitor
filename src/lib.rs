@@ -9,3 +9,4 @@ pub mod storage;
 pub mod terminal;
 pub mod traffic;
 pub mod ui;
+pub mod web;

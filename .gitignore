@@ -3,3 +3,5 @@
 /HANDOVER.md
 *.sqlite*
 .DS_Store
+/web/dist/
+/web/.stage/
