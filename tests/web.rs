@@ -5,6 +5,7 @@ use network_monitor::{
     storage::{Recorder, Session},
     ui::View,
     web,
+    wifi::{WifiInterface, WifiLink, WifiMode, WifiSnapshot},
 };
 use network_monitor_web_types::{
     Health, LiveSnapshot, RecordingDetail, RecordingState, RecordingSummary,
@@ -95,7 +96,7 @@ async fn get_json<T: serde::de::DeserializeOwned>(address: std::net::SocketAddr,
 }
 
 #[tokio::test]
-async fn recordings_replay_complete_probe_groups_and_expose_unknown_recordings_as_404() {
+async fn recordings_replay_probe_groups_with_wifi_and_expose_unknown_recordings_as_404() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("rides.sqlite3");
     let config = Config::default();
@@ -115,6 +116,26 @@ async fn recordings_replay_complete_probe_groups_and_expose_unknown_recordings_a
                 kind: ProbeKind::Tcp,
                 target,
                 outcome: ProbeOutcome::Timeout,
+            }))
+            .await
+            .unwrap();
+    }
+    for (elapsed_ms, link) in [(0, WifiLink::Inactive), (1000, WifiLink::Active)] {
+        recorder
+            .record(Event::Wifi(WifiEvent {
+                at: stamp(started, elapsed_ms),
+                started_elapsed_ms: elapsed_ms,
+                snapshot: Some(WifiSnapshot {
+                    interfaces: vec![WifiInterface {
+                        name: "en0".into(),
+                        power_reported_on: true,
+                        mode: WifiMode::Station,
+                        link,
+                        ssid: None,
+                        bssid: None,
+                    }],
+                }),
+                quality: WifiSampleQuality::Valid,
             }))
             .await
             .unwrap();
@@ -142,7 +163,7 @@ async fn recordings_replay_complete_probe_groups_and_expose_unknown_recordings_a
     );
     assert_eq!(recording.healthy_percent, Some(50.0));
     assert_eq!(recording.median_latency_ms, Some(20));
-    assert_eq!(recording.event_count, 6);
+    assert_eq!(recording.event_count, 8);
     assert!(!recording.truncated);
     let missing = reqwest::get(format!("http://{}/api/recordings/unknown", server.address))
         .await
