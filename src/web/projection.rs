@@ -301,6 +301,7 @@ impl Replay {
             Event::Gap(gap) => Some(gap.from_elapsed_ms),
             Event::Probe(_)
             | Event::Traffic(_)
+            | Event::Wifi(_)
             | Event::Location(_)
             | Event::ClockAdjusted { .. } => None,
         };
@@ -344,7 +345,7 @@ impl Replay {
                 self.break_pending = true;
                 self.generation = gap.at.generation;
             }
-            Event::Probe(_) | Event::Traffic(_) | Event::ClockAdjusted { .. } => {}
+            Event::Probe(_) | Event::Traffic(_) | Event::Wifi(_) | Event::ClockAdjusted { .. } => {}
         }
         self.at = (stamp.elapsed_ms, stamp.utc);
         self.has_events = true;

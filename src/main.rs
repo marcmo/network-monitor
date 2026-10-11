@@ -7,6 +7,7 @@ use network_monitor::{
     probe::{NetworkProbes, ProbeSetupError},
     scheduler::{EVENT_QUEUE_CAPACITY, SamplerError, SystemClock},
     traffic::{NativeCounters, TrafficWorker},
+    wifi::{NativeWifi, WifiWorker},
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -109,6 +110,7 @@ fn run_worker(
         .build()?;
     let runner = NetworkProbes::new(&options.config)?;
     let traffic = TrafficWorker::new(NativeCounters)?;
+    let wifi = WifiWorker::new(NativeWifi)?;
     let (controls, control_rx) = mpsc::channel(8);
     let (views, view_rx) = watch::channel(None);
     let web = runtime.block_on(network_monitor::web::start(
@@ -151,10 +153,11 @@ fn run_worker(
             result
         })?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(network_monitor::app::run_session(
+        runtime.block_on(network_monitor::app::run_session_with_wifi(
             options,
             runner,
             traffic,
+            Some(wifi),
             clock,
             AppPorts {
                 controls: control_rx,

@@ -13,8 +13,9 @@ visible beside the five-minute history. Press `d` for detailed diagnostics.
 
 Requires macOS, Rust 1.88 or newer, the Xcode Command Line Tools, the
 `wasm32-unknown-unknown` Rust target, and Trunk 0.21.14. The application uses Tokio,
-Ratatui/Crossterm, reqwest/Rustls, bundled SQLite, Apple's CoreLocation, and
-Leptos. No separate SQLite installation is needed. From the repository root:
+Ratatui/Crossterm, reqwest/Rustls, bundled SQLite, Apple's CoreLocation and
+CoreWLAN, and Leptos. No separate SQLite installation is needed. From the
+repository root:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -153,7 +154,8 @@ Current status means:
 TCP observations become stale after 5 s by default. DNS and HTTPS freshness
 limits include their slower cadence and deadline plus 1 s: 18 s and 34 s
 respectively. An unavailable or canceled check is not a measured network
-failure. Location availability does not affect connectivity status.
+failure. Location availability and Wi-Fi observations do not affect connectivity
+status.
 
 Only one system DNS worker exists, with a bounded mailbox. An uncancellable
 `getaddrinfo` call can make DNS/HTTPS unavailable until it returns; it cannot
@@ -216,6 +218,34 @@ and retain the highest rate in each display column. Each has its own labeled Mbp
 measurement. Changing the interface clears the live traffic plots so their
 scope matches the displayed interface; earlier raw events remain recorded.
 
+## Wi-Fi connection trace
+
+While the terminal application is open, it records Wi-Fi observations once per
+second with a 500 ms application deadline. One worker reads native state through
+a bounded mailbox. This is observation only: it does not scan for access points,
+reconnect, or change network settings. Wi-Fi observations are retained with the
+ride; the current display and internet status continue to use the existing probes.
+
+Each successful snapshot records all reported CoreWLAN interfaces, sorted by
+name; a query returning more than 16 interfaces produces a read error. Each entry
+includes the interface name, reported power state, mode, link state, and available
+SSID/BSSID. Station mode is
+positive evidence of association even when the network identity is missing.
+Missing SSID/BSSID can reflect macOS permissions or an unavailable query; they
+do not establish disconnection. Likewise, native getters can return `false` or
+`none` on error, so these values are recorded without claiming that Wi-Fi is
+definitely off or disconnected. Link state is retained separately as `active`,
+`inactive`, or `unavailable` with a reason.
+
+Network names and BSSIDs may require Location Services authorization in the
+application's launch context. Use the bundled executable and inspect the location
+permissions described below if identity fields remain unavailable. Recorded
+SSID/BSSID values remain in the local ride database along with the other traces.
+
+Compare these snapshots with probe failures to investigate hotspot dropouts.
+Polling can miss transitions shorter than one second and cannot establish
+whether the iPhone is still advertising its hotspot after a disconnection.
+
 ## Complete recordings
 
 Recordings use SQLite with WAL journaling and `synchronous=FULL`. Raw events are
@@ -250,7 +280,19 @@ them. Baselines, interface changes, resets, gaps, late/out-of-order readings, an
 source errors remain explicit instead of being stored as zero traffic. Readings
 have a 500 ms deadline and valid rates become stale after 2.5 s.
 
-`event_type` is `probe`, `gap`, `location`, `traffic`, or `clock_adjusted`. JSON payloads use
+Wi-Fi events (`event_type = 'wifi'`) use the same schema version and event table.
+They retain query start elapsed time, completion/receipt UTC and elapsed time,
+observation generation, a snapshot, and sample quality. Quality uses a `type`
+field: `valid`, `timeout`, `unavailable` (with `reason`), `gap`, `late`, or
+`out_of_order`. Successful snapshots retain timing quality; timeouts and source
+errors retain their outcome even when delivery is delayed. An empty
+`snapshot.interfaces` list is a successful query with no reported interfaces;
+a `null` snapshot means no snapshot was obtained. Interface
+fields are `name`, `power_reported_on`, `mode`, `link`, `ssid`, and `bssid`.
+Modes are `station`, `none`, `ibss`, `host_ap`, or an `{"unknown": number}` value;
+link objects use `type` and an optional `reason` for `unavailable`.
+
+`event_type` is `probe`, `gap`, `location`, `traffic`, `wifi`, or `clock_adjusted`. JSON payloads use
 an `event` discriminator and a `data` object. Probe outcomes use `type` and, when
 needed, `detail`; for example `success`, `timeout`, `refused`, `network_error`,
 `dns_error`, `http_status`, `tls_or_http_error`, `unavailable`, or `cancelled`.
@@ -267,11 +309,22 @@ SELECT utc, elapsed_ms,
        json_extract(payload_json, '$.data.duration_ms') AS duration_ms,
        json_extract(payload_json, '$.data.outcome.type') AS outcome
 FROM events WHERE event_type = 'probe' ORDER BY id;
+
+SELECT session_id, elapsed_ms, utc, event_type,
+       json_extract(payload_json, '$.data.quality.type') AS wifi_quality,
+       json_extract(payload_json, '$.data.snapshot.interfaces') AS wifi_interfaces,
+       json_extract(payload_json, '$.data.target') AS probe_target,
+       json_extract(payload_json, '$.data.outcome.type') AS probe_outcome
+FROM events WHERE event_type IN ('wifi', 'probe') ORDER BY session_id, id;
 ```
 
-For SQL analysis, join source timestamps explicitly and choose age/accuracy
-limits appropriate for your analysis. The dashboard's 30-second and 1,000-meter
-limits apply only to its display projection; they do not modify raw recordings.
+Use `elapsed_ms` within the same session to compare Wi-Fi and probe observations;
+it includes sleep and is unaffected by UTC clock adjustments. Their event time
+is completion/receipt time; payload `started_elapsed_ms` records the query start.
+No location fix is silently attached to a later probe. Join source timestamps
+explicitly and choose age/accuracy limits appropriate for your analysis.
+The dashboard's 30-second and 1,000-meter limits apply only to its display
+projection; they do not modify raw recordings.
 
 ## Location permissions and gaps
 

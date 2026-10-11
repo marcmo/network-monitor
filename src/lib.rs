@@ -10,3 +10,4 @@ pub mod terminal;
 pub mod traffic;
 pub mod ui;
 pub mod web;
+pub mod wifi;

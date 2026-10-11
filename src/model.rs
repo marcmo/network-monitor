@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::wifi::WifiSnapshot;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Stamp {
@@ -90,6 +91,25 @@ pub struct LocationEvent {
     pub state: LocationState,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WifiSampleQuality {
+    Valid,
+    Timeout,
+    Unavailable { reason: String },
+    Gap,
+    Late,
+    OutOfOrder,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct WifiEvent {
+    pub at: Stamp,
+    pub started_elapsed_ms: u64,
+    pub snapshot: Option<WifiSnapshot>,
+    pub quality: WifiSampleQuality,
+}
+
 pub const TRAFFIC_INTERVAL_MS: u64 = 1000;
 pub const TRAFFIC_STALE_AFTER_MS: u64 = 2500;
 pub const TRAFFIC_TIMEOUT_MS: u64 = 500;
@@ -148,6 +168,7 @@ pub struct TrafficState {
 pub enum Event {
     Probe(Observation),
     Traffic(TrafficEvent),
+    Wifi(WifiEvent),
     Gap(Gap),
     Location(LocationEvent),
     ClockAdjusted { at: Stamp, delta_ms: i64 },
@@ -158,6 +179,7 @@ impl Event {
         match self {
             Self::Probe(v) => &v.at,
             Self::Traffic(v) => &v.at,
+            Self::Wifi(v) => &v.at,
             Self::Gap(v) => &v.at,
             Self::Location(v) => &v.at,
             Self::ClockAdjusted { at, .. } => at,
@@ -350,7 +372,7 @@ impl Monitor {
                 }
             }
             Event::Location(location) => self.location = Some(location),
-            Event::ClockAdjusted { .. } => {}
+            Event::Wifi(_) | Event::ClockAdjusted { .. } => {}
         }
     }
 
