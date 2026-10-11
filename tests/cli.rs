@@ -47,3 +47,19 @@ fn help_is_available_without_a_terminal() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("--label"));
     assert!(!output.stdout.contains(&27));
 }
+
+#[test]
+fn web_listener_has_a_stable_default_and_an_explicit_port_override() {
+    let ParseResult::Run(defaults) = Cli::parse([]).unwrap() else {
+        panic!("expected launch");
+    };
+    assert_eq!(defaults.web_port, 8742);
+    let ParseResult::Run(custom) = Cli::parse(["--web-port", "9123"].map(OsString::from)).unwrap()
+    else {
+        panic!("expected launch");
+    };
+    assert_eq!(custom.web_port, 9123);
+    for port in ["0", "65536", "host:80", "-1"] {
+        assert!(Cli::parse(["--web-port", port].map(OsString::from)).is_err());
+    }
+}

@@ -2,13 +2,25 @@ use std::{ffi::OsString, path::PathBuf};
 
 use crate::config::Config;
 
-pub const HELP: &str = "network-monitor - record internet checks while the TUI is open\n\nUsage: network-monitor [--label LABEL] [--config PATH] [--db PATH]\n\n  --label LABEL  Optional ride label\n  --config PATH Read probe settings from a TOML file\n  --db PATH     Recording database (default: ~/Library/Application Support/network-monitor/rides.sqlite3)\n  --help        Show this help\n  --version     Show version\n\nPress q or Ctrl-C to finish the recording. An interactive terminal is required.";
+pub const HELP: &str = "network-monitor - record internet checks while the TUI is open\n\nUsage: network-monitor [--label LABEL] [--config PATH] [--db PATH] [--web-port PORT]\n\n  --label LABEL  Optional ride label\n  --config PATH Read probe settings from a TOML file\n  --db PATH     Recording database (default: ~/Library/Application Support/network-monitor/rides.sqlite3)\n  --web-port PORT Local dashboard port (default: 8742)\n  --help        Show this help\n  --version     Show version\n\nPress q or Ctrl-C to finish the recording. An interactive terminal is required.";
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Cli {
     pub label: Option<String>,
     pub config_path: Option<PathBuf>,
     pub database_path: Option<PathBuf>,
+    pub web_port: u16,
+}
+
+impl Default for Cli {
+    fn default() -> Self {
+        Self {
+            label: None,
+            config_path: None,
+            database_path: None,
+            web_port: 8742,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -48,7 +60,7 @@ impl Cli {
             match name {
                 "--help" | "-h" => return Ok(ParseResult::Help),
                 "--version" | "-V" => return Ok(ParseResult::Version),
-                "--label" | "--config" | "--db" => {
+                "--label" | "--config" | "--db" | "--web-port" => {
                     let value = args
                         .next()
                         .ok_or_else(|| CliError::Argument(format!("{name} requires a value")))?;
@@ -60,6 +72,17 @@ impl Cli {
                         }
                         "--config" => options.config_path = Some(value.into()),
                         "--db" => options.database_path = Some(value.into()),
+                        "--web-port" => {
+                            options.web_port = value
+                                .to_str()
+                                .and_then(|value| value.parse::<u16>().ok())
+                                .filter(|port| *port > 0)
+                                .ok_or_else(|| {
+                                    CliError::Argument(
+                                        "--web-port must be between 1 and 65535".into(),
+                                    )
+                                })?;
+                        }
                         _ => return Err(CliError::Argument(format!("unknown option: {name}"))),
                     }
                 }

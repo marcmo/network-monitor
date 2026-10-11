@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Network monitor - three design directions</title>
+  <style>
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f8f9f6}iframe{display:block;border:0;width:100%;height:100%}button{font:inherit;cursor:pointer}button:focus-visible,a:focus-visible{outline:2px solid #abd8bd;outline-offset:4px}.switcher{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:18px;padding:10px 12px 10px 20px;max-width:calc(100% - 28px);background:#202825;color:#fff;border:1px solid #3d4641;border-radius:14px;box-shadow:0 8px 35px #14231a25;z-index:5}.context{white-space:nowrap;min-width:114px}.eyebrow{font-size:9px;letter-spacing:1.7px;font-weight:600;color:#a9b4ad;margin-bottom:4px}.current-tab{font-size:12px;color:#e1e8e1}.options{display:flex;gap:4px;align-items:center}.option{color:#bbc6bd;background:transparent;border:0;padding:11px 15px;border-radius:8px;font-size:12px;white-space:nowrap}.option span{margin-right:7px;font-size:10px;opacity:.6}.option:hover{background:#354039;color:white}.option[aria-pressed=true]{color:#17261d;background:#e4eddf}.arrow,.about{display:grid;place-items:center;color:#bcc8bf;background:none;border:1px solid #526055;width:30px;height:30px;border-radius:50%;font-size:14px;flex-shrink:0}.arrow{border:0;width:22px}.arrow:hover,.about:hover{color:white}.divider{height:24px;border-left:1px solid #455148}dialog{color:#253028;background:#f8f9f5;border:1px solid #d7ddd2;border-radius:14px;max-width:680px;width:calc(100% - 36px);padding:34px;box-shadow:0 18px 80px #0002}dialog::backdrop{background:#17282070;backdrop-filter:blur(5px)}dialog h1{font-size:28px;font-weight:500;letter-spacing:-1px;margin:12px 0 18px}dialog p{font-size:14px;line-height:1.6;color:#627063}dialog .close{float:right;border:0;background:#e8ede4;color:#26352b;border-radius:50%;width:28px;height:28px}dialog dl{border-top:1px solid #dbe0d6;margin-top:26px}dialog dt{font-size:14px;font-weight:600;margin:20px 0 6px}dialog dd{font-size:13px;line-height:1.6;color:#627063;margin:0 0 20px}dialog .note{padding:14px 18px;background:#eaf0e4;border-radius:6px;font-size:12px}dialog code{font-size:11px}.label-mobile{display:none}@media(max-width:700px){.switcher{gap:6px;padding:8px;bottom:12px;border-radius:12px}.context{display:none}.option{padding:11px 10px;font-size:11px}.option span{margin-right:4px}.arrow{width:17px}.divider{display:none}.about{width:25px;height:25px;font-size:12px}.options{gap:1px}dialog{padding:24px}dialog h1{font-size:23px}}@media(prefers-reduced-motion:no-preference){.option{transition:background .15s,color .15s}}
+  </style>
+</head>
+<body>
+  <iframe id="proposal" title="Network monitor design proposal"></iframe>
+  <nav class="switcher" aria-label="Compare design proposals">
+    <div class="context"><div class="eyebrow">DESIGN STUDY / 01</div><div class="current-tab" id="context">Live / three proposals</div></div>
+    <button class="arrow" id="previous" aria-label="Previous design">&#8592;</button>
+    <div class="options" aria-label="Design direction">
+      <button class="option" data-variant="A"><span>A</span>Quiet</button>
+      <button class="option" data-variant="B"><span>B</span>Instrument</button>
+      <button class="option" data-variant="C"><span>C</span>Fieldnotes</button>
+    </div>
+    <button class="arrow" id="next" aria-label="Next design">&#8594;</button>
+    <span class="divider"></span><button class="about" id="about" aria-label="About these proposals">?</button>
+  </nav>
+  <dialog id="notes">
+    <button class="close" aria-label="Close design notes">&#215;</button>
+    <div class="eyebrow" style="color:#758272">NETWORK MONITOR / DESIGN EXPLORATION</div>
+    <h1>A quieter window into your connection.</h1>
+    <p>Three directions, each with a Live tab and a Recordings tab. Switch between them using the bar below or the left and right arrow keys. You can choose a different direction for each tab.</p>
+    <dl>
+      <dt>A / Quiet</dt><dd>A light, spacious dashboard. Connection health comes first; recordings pair a familiar list with a clear route map.</dd>
+      <dt>B / Instrument</dt><dd>A compact dark workspace. A larger plot and a persistent diagnostics rail keep detailed observations close at hand.</dd>
+      <dt>C / Fieldnotes</dt><dd>A warm travel journal. Larger typography, route context, and a map-led recording view give each journey room to breathe.</dd>
+    </dl>
+    <p class="note">These are interactive HTML proposals with illustrative data and locally drawn maps. They do not connect to the monitor. The selected design will be implemented in Leptos and served locally while the monitor runs.</p>
+    <p>Map colors describe sampled connection quality along a route. They do not predict area or carrier coverage. Dashed sections indicate unavailable location; down/up values are passive interface traffic.</p>
+  </dialog>
+  <script>
+    const variants = {A:{file:'quiet.html',name:'Quiet'},B:{file:'instrument.html',name:'Instrument'},C:{file:'journal.html',name:'Fieldnotes'}};
+    const frame = document.querySelector('#proposal');
+    let variant, tab;
+    function readUrl() {
+      const params = new URLSearchParams(location.search);
+      variant = Object.hasOwn(variants, params.get('variant')) ? params.get('variant') : 'A';
+      tab = params.get('tab') === 'recordings' ? 'recordings' : 'live';
+    }
+    function render(reload = true) {
+      document.querySelectorAll('[data-variant]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.variant === variant)));
+      document.querySelector('#context').textContent = `${tab === 'live' ? 'Live' : 'Recordings'} / three proposals`;
+      document.title = `${variants[variant].name} / ${tab === 'live' ? 'Live' : 'Recordings'} - Network monitor proposals`;
+      frame.title = `${variants[variant].name}: ${tab === 'live' ? 'live statistics' : 'recordings and coverage'} proposal`;
+      if (reload) frame.src = `${variants[variant].file}?tab=${tab}`;
+    }
+    function saveUrl() {
+      const url = new URL(location.href);url.searchParams.set('variant',variant);url.searchParams.set('tab',tab);
+      history.replaceState(null,'',url);
+    }
+    function select(key) { variant=key;saveUrl();render(); }
+    function cycle(offset) { const keys=Object.keys(variants);select(keys[(keys.indexOf(variant)+offset+keys.length)%keys.length]); }
+    document.querySelectorAll('[data-variant]').forEach(b => b.addEventListener('click',()=>select(b.dataset.variant)));
+    document.querySelector('#previous').addEventListener('click',()=>cycle(-1));
+    document.querySelector('#next').addEventListener('click',()=>cycle(1));
+    const notes = document.querySelector('#notes');
+    document.querySelector('#about').addEventListener('click',()=>notes.showModal());
+    notes.querySelector('.close').addEventListener('click',()=>notes.close());
+    function keyboard(event) {
+      if (notes.open || event.target.closest('input,textarea,select,[contenteditable=true]')) return;
+      if (event.key==='ArrowRight' || event.key==='ArrowLeft') {event.preventDefault();cycle(event.key==='ArrowRight'?1:-1);}
+    }
+    document.addEventListener('keydown',keyboard);
+    frame.addEventListener('load',()=>{
+      try {frame.contentDocument.addEventListener('keydown',keyboard);} catch (_) { /* Local file origins may isolate the frame. */ }
+    });
+    window.addEventListener('message',event=>{
+      if(event.source!==frame.contentWindow || event.data?.type!=='prototype-tab')return;
+      if(event.data.tab!=='live' && event.data.tab!=='recordings')return;
+      tab=event.data.tab;saveUrl();render(false);
+    });
+    window.addEventListener('popstate',()=>{readUrl();render();});
+    readUrl();render();
+  </script>
+</body>
+</html>

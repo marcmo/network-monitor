@@ -1,0 +1,12 @@
+[build]
+target = "index.html"
+dist = "dist"
+public_url = "/"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8743
+open = false
+
+[[proxy]]
+backend = "http://127.0.0.1:8742/api/"

@@ -1,8 +1,8 @@
 # Network Monitor
 
-A Rust terminal application for monitoring the Mac's current internet connection
-and retaining complete ride recordings. No daemon, speed tests, bandwidth claims,
-or comparison of alternative networks.
+A Rust terminal application with a local Leptos dashboard for monitoring the
+Mac's current internet connection and retaining complete ride recordings. No
+daemon, speed tests, bandwidth claims, or comparison of alternative networks.
 
 ![Terminal overview with latency history, current connection quality, and passive download/upload traffic](docs/images/overview.png)
 
@@ -11,27 +11,31 @@ visible beside the five-minute history. Press `d` for detailed diagnostics.
 
 ## Build and launch
 
-Requires macOS, Rust 1.88 or newer, and the Xcode Command Line Tools. The
-application uses Tokio, Ratatui/Crossterm, reqwest/Rustls, bundled SQLite, and
-Apple's CoreLocation. No separate SQLite installation is needed.
+Requires macOS, Rust 1.88 or newer, the Xcode Command Line Tools, the
+`wasm32-unknown-unknown` Rust target, and Trunk 0.21.14. The application uses Tokio,
+Ratatui/Crossterm, reqwest/Rustls, bundled SQLite, Apple's CoreLocation, and
+Leptos. No separate SQLite installation is needed. From the repository root:
 
 ```sh
-cd /Users/oliver.mueller/dev/network_monitor
+rustup target add wasm32-unknown-unknown
+cargo install trunk --version 0.21.14 --locked
 ./scripts/package-app.sh
-"/Users/oliver.mueller/dev/network_monitor/target/Network Monitor.app/Contents/MacOS/network-monitor" --label "Train ride"
+"./target/Network Monitor.app/Contents/MacOS/network-monitor" --label "Train ride"
 ```
 
-The script builds a release executable, creates the app bundle, and applies and
-verifies an ad-hoc signature. The package contains one executable and has no
-application helper process. Launch the executable from your terminal; keep the
+The script builds the release dashboard and executable, creates the app bundle,
+and applies and verifies an ad-hoc signature. The package contains one executable
+and the dashboard assets, with no application helper process. Launch the executable from your terminal; keep the
 terminal open while recording. Every launch starts a new session. Use a terminal
 of at least 80 columns by 24 rows; recording continues if it becomes smaller.
 Press `d` to toggle Details and `Esc` to return to the overview.
 Press `q` or Ctrl-C to finish and restore the terminal. SIGINT, SIGTERM, and SIGHUP
 also request an orderly shutdown.
 
-A plain `cargo build --release` also builds the executable, but the minimal app
-bundle was necessary to obtain a location prompt in the tested launch context.
+A plain `cargo build --release` also builds the executable. Run
+`./scripts/build-web.sh` to produce the separate dashboard assets in `web/dist`.
+The app bundle was necessary to obtain a location prompt in the tested launch
+context.
 
 The default recording database is
 `~/Library/Application Support/network-monitor/rides.sqlite3`; parent directories
@@ -39,8 +43,8 @@ are created automatically. Override the configuration, database, and optional
 ride label independently:
 
 ```sh
-"/Users/oliver.mueller/dev/network_monitor/target/Network Monitor.app/Contents/MacOS/network-monitor" \
-  --config "/Users/oliver.mueller/dev/network_monitor/config.example.toml" \
+"./target/Network Monitor.app/Contents/MacOS/network-monitor" \
+  --config "./config.example.toml" \
   --db "$HOME/Library/Application Support/network-monitor/test-rides.sqlite3" \
   --label "Train ride"
 ```
@@ -48,6 +52,54 @@ ride label independently:
 Use `--help` for options and `--version` for the application version. Monitoring
 requires an interactive terminal for both input and output; redirected launches
 are rejected before creating a recording.
+
+## Local dashboard
+
+Open [http://127.0.0.1:8742](http://127.0.0.1:8742) while the monitor runs. The
+dashboard uses the selected dark Instrument design on both tabs:
+
+- **Live** shows current connectivity, TCP timing, passive traffic, the recent
+  history, and per-check diagnostics. It reads the same snapshots as the terminal
+  and distinguishes a disconnected browser from measured network failures.
+- **Recordings** lists the current and previous sessions with an interactive
+  route, observed connectivity colors, and a timeline scrubber. An interrupted
+  session is labeled unfinished; only the published live session is current.
+
+The HTTP server runs inside the monitor process and binds only to IPv4 loopback.
+The page remains available during an internet outage, provided the monitor is
+still running and the dashboard assets were built. Closing the browser does not
+stop recording. Quitting the monitor stops the web server and live stream.
+Choose a different local port if necessary:
+
+```sh
+"./target/Network Monitor.app/Contents/MacOS/network-monitor" --web-port 8744
+```
+
+Then open [http://127.0.0.1:8744](http://127.0.0.1:8744). The dashboard is read-only;
+it has no remote access, recording deletion, or recording controls.
+
+The route and observation layers use local SVG rendering and work without
+internet access. **Street map** is off by default. Enabling it loads background
+tiles from OpenStreetMap using the monitored connection; those requests reveal
+the viewed map area to the tile service and contribute to interface traffic.
+The route remains usable when tiles cannot load.
+
+Coverage colors describe **sampled connectivity observations along the recorded
+route**, not geographic or carrier coverage. Missing locations are not joined
+by a route line. The dashboard accepts fixes with a source age of 0-30 seconds
+and reported accuracy of at most 1,000 meters, and splits the route at missing
+fixes and observation-generation changes. Raw fixes remain in SQLite even when
+excluded from the map.
+
+Recording timelines contain at most 10,000 display points across the entire
+session, including its final observation. Longer sessions use wider sampling
+intervals and show a sampling notice. Brief changes between display samples can
+be omitted; raw events remain recorded. Healthy percentages exclude starting and
+unknown samples. Passive traffic still means observed interface activity.
+
+`?demo=1` explicitly selects synthetic, labeled demonstration data. It does not
+show your connection or recordings. See [dashboard validation](docs/web-validation.md)
+for the integration fixture, test commands, design details, and evidence limits.
 
 ## Checks and interpretation
 
@@ -217,8 +269,9 @@ SELECT utc, elapsed_ms,
 FROM events WHERE event_type = 'probe' ORDER BY id;
 ```
 
-No location fix is silently attached to a later probe. Join source timestamps
-explicitly and choose age/accuracy limits appropriate for your analysis.
+For SQL analysis, join source timestamps explicitly and choose age/accuracy
+limits appropriate for your analysis. The dashboard's 30-second and 1,000-meter
+limits apply only to its display projection; they do not modify raw recordings.
 
 ## Location permissions and gaps
 
@@ -260,6 +313,9 @@ See [VALIDATION.md](VALIDATION.md) for the release measurements, exact verificat
 commands, terminal cleanup results, and limits of the evidence. Resource targets
 are below 1% of one CPU core, 50 MiB resident memory, and 10 MB/hour of application
 probe traffic. Traffic estimates describe probe cost, not available bandwidth.
+Dashboard-specific checks and runtime evidence belong in
+[docs/web-validation.md](docs/web-validation.md). The terminal resource baseline
+below predates the dashboard and does not measure its browser or server cost.
 
 The resource baseline at `ab1b728` used two 315 s release runs with passive
 traffic and sparklines. On this Mac they measured

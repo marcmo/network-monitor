@@ -1,4 +1,4 @@
-use std::{io::IsTerminal, os::unix::net::UnixStream, thread};
+use std::{io::IsTerminal, os::unix::net::UnixStream, path::PathBuf, thread};
 
 use network_monitor::{
     app::{AppOptions, AppPorts, Control},
@@ -24,6 +24,8 @@ enum LaunchError {
     Probes(#[from] ProbeSetupError),
     #[error(transparent)]
     App(#[from] network_monitor::app::AppError),
+    #[error(transparent)]
+    Web(#[from] network_monitor::web::WebError),
     #[error("{0}")]
     Worker(String),
 }
@@ -53,6 +55,7 @@ fn launch() -> Result<(), LaunchError> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(LaunchError::NonTerminal);
     }
+    let web_port = options.web_port;
     let config = options.config()?;
     let database = options.database()?;
     let options = AppOptions {
@@ -73,7 +76,7 @@ fn launch() -> Result<(), LaunchError> {
         .name("monitor".into())
         .spawn(move || {
             let _stop = StopMain(stop_worker);
-            run_worker(options, clock, locations, location_result)
+            run_worker(options, web_port, clock, locations, location_result)
         })?;
     let native_result = location::run_main(locations_tx, stop_main);
     let _ = native_tx.send(native_result);
@@ -96,6 +99,7 @@ impl Drop for StopMain {
 
 fn run_worker(
     options: AppOptions,
+    web_port: u16,
     clock: SystemClock,
     locations: mpsc::Receiver<location::RawLocationEvent>,
     location_result: oneshot::Receiver<Result<(), location::LocationError>>,
@@ -107,6 +111,13 @@ fn run_worker(
     let traffic = TrafficWorker::new(NativeCounters)?;
     let (controls, control_rx) = mpsc::channel(8);
     let (views, view_rx) = watch::channel(None);
+    let web = runtime.block_on(network_monitor::web::start(
+        web_port,
+        options.database.clone(),
+        view_rx.clone(),
+        web_assets(),
+    ))?;
+    eprintln!("Web dashboard: http://{}", web.address);
     let signal_controls = controls.clone();
     let signals = runtime.block_on(async move {
         let mut interrupt =
@@ -154,12 +165,28 @@ fn run_worker(
         ))
     }));
     signals.abort();
+    let web_result = runtime.block_on(web.shutdown()).map_err(LaunchError::from);
     let terminal_result = terminal
         .join()
         .map_err(|_| LaunchError::Worker("terminal thread panicked".into()))?
         .map_err(LaunchError::Worker);
     match result {
-        Ok(result) => result.map_err(LaunchError::from).and(terminal_result),
+        Ok(result) => result
+            .map_err(LaunchError::from)
+            .and(terminal_result)
+            .and(web_result),
         Err(_) => Err(LaunchError::Worker("application worker panicked".into())),
     }
+}
+
+fn web_assets() -> PathBuf {
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(directory) = executable.parent()
+    {
+        let packaged = directory.join("../Resources/web");
+        if packaged.join("index.html").is_file() {
+            return packaged;
+        }
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web/dist")
 }
