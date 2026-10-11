@@ -1,9 +1,7 @@
 # Dashboard design and validation
 
-The approved direction is proposal B, Instrument, for both Live and Recordings.
-The implementation uses a dark, compact layout with clear numeric readings and
-a map-centered recording explorer. The original proposal is retained in
-[web-proposals/instrument.html](web-proposals/instrument.html).
+The Live and Recordings tabs use the Instrument design: a dark, compact layout
+with clear numeric readings and a map-centered recording explorer.
 
 ## Architecture
 
